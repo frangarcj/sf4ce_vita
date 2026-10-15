@@ -223,7 +223,7 @@ Per touch (8 shorts):
 - [x] Boot, name entry, offline menu and combat in Vita3K
 - [x] Store/Battle removed from the main panel and right navbar
 - [x] Stable static main-menu background (optional replay preview disabled)
-- [x] Native ETC1 textures (Vita3K needs ETC1 support, PR #3903)
+- [x] Native ETC1 textures (Vita3K needs ETC1/base-vertex support, PR #3903)
 - [x] Original Vita icon/LiveArea resources, with no APK artwork
 - [x] Native Vita PCM output from the embedded Cricket mixer (tested in Vita3K)
 - [x] Explicit RGBA8 conversion for 5551 initial/partial texture uploads

@@ -16,8 +16,13 @@ trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
   locales. Prueba ASan/UBSan: rama/destino y rechazo de firmas incompatibles.
 - Se conservaron las modificaciones existentes del checkout hermano Vita3K.
   Se integró sólo ETC1 de https://github.com/Vita3K/Vita3K/pull/3903, revisión
-  `7606ed4e85402aaa62d1aa0dadccbc5eb3de5007`; no se aplicó la parte base-vertex
-  ni la sobrecarga de formato 5551 ajena a ETC1. Compilación local correcta.
+  `7606ed4e85402aaa62d1aa0dadccbc5eb3de5007`. La primera pasada aplicó ETC1;
+  se añadió después base-vertex adaptándolo a los cambios locales de clipping
+  y rebasing de índices. Se omitió la sobrecarga de formato 5551 ajena a ETC1.
+  Compilación local correcta. Se corrigió además la conversión de palabras
+  ETC1 entre el orden de bytes GXM y el stream ETC2 y el orden de bloques antes
+  de descomprimir: la PR original evitaba el cierre pero dejaba el fondo corrupto.
+  No se han publicado ni enviado cambios a la PR desde esta tarea.
   La conversión ETC1 temporal del loader se retiró: el port usa ETC1 nativo.
 - La ocultación de botones táctiles conserva su dibujo original al configurar
   el panel táctil (`ST_PadSettingSystem` y `ST_PadSettingToPauseSystem`); sigue
@@ -36,6 +41,16 @@ trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
 - `DebugReplay` acepta comandos añadidos al archivo al llegar a EOF, sólo con
   `debug_input_replay=1`. Permite recorrer menús en el guest sin eventos de
   entrada del escritorio. Probado con duraciones, EOF y comandos inválidos.
+
+- CI de GitHub del commit `185951479cf73e8901f8e817987d6a869a1d6574`: pruebas
+  de host y compilación/VPK correctas. Se descarga y prueba el propio VPK de CI,
+  no se sustituye por otro binario local. SHA256 del paquete de release:
+  `2550c671c44666d9e4a30ec07c32744c04f3d26b89280a177d7402ec98891389`.
+- Capturas locales de QA (no publicadas): `release-command-list.png` y
+  `release-touch-config.png`. Lista de comandos, selección de personaje,
+  detalles y configuración de botones dibujan bien con la versión del emulador
+  corregida. La configuración conserva la interfaz táctil; no redefine el mando
+  físico. La memoria protegida del emulador aún registra avisos recuperados.
 
 ## Intro original y negro al dejar el título inactivo (2026-10-16)
 
