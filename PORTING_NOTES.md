@@ -52,6 +52,24 @@ trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
   corregida. La configuración conserva la interfaz táctil; no redefine el mando
   físico. La memoria protegida del emulador aún registra avisos recuperados.
 
+- Validación final del VPK descargado de CI: 300 s de navegación por Main,
+  Other, Options, lista de comandos/selección/detalles y configuración táctil
+  (incluido diálogo de guardar y regreso). Otra sesión de 200 s recorre la
+  intro con audio, Start para saltar, error de Record con retorno y combate
+  Honda/Sagat. Se observa ~60 presentaciones y ~20 updates/s en combate;
+  sin overlay táctil residual. Ambas sesiones finalizan con salida 0.
+- Record depende de red y muestra Connection Error. El botón de retorno del
+  diálogo permite continuar al modo local; no se presenta como una función
+  offline soportada. No se certifica cada opción de servicios online.
+- Se restauran las opciones/replay de la instalación portable de prueba. Los
+  saves y recursos originales fuera de esa copia no se modifican. Logs y
+  resultados locales: `release-final-results.json` en la carpeta de diagnóstico
+  de esta pasada. Captura local final: `release-ci-combat.png`.
+- El borrador GitHub contiene `SF4CE.vpk` (1.268.095 bytes) y `SHA256SUMS`.
+  Se descargó otra vez desde GitHub y coincide byte a byte con el VPK de CI
+  probado. El contenido publicado del repo fue auditado sin archivos del APK.
+  La revisión posterior al commit de CI sólo cambia documentación.
+
 ## Intro original y negro al dejar el título inactivo (2026-10-16)
 
 Se reprodujo el fallo sin pulsar nada: título normal a los 15 s y casi negro
