@@ -1,3 +1,4 @@
+#include "render_interpolation.h"
 /* Bionic ABI compatibility helpers for the SF4CE Android ARMv7 module.
  *
  * Copyright (C) 2026 SF4CE Vita contributors
@@ -27,6 +28,7 @@ extern "C" {
 
 #include "bridge.h"
 #include "config.h"
+#include "texture_upload.h"
 
 extern "C" int ftruncate(int fd, off_t length);
 extern "C" int truncate(const char *path, off_t length);
@@ -576,47 +578,22 @@ void glCompressedTexSubImage2D_compat(unsigned int target, int level,
               image_size, data);
 }
 
-/* Android/OpenGL GL_UNSIGNED_SHORT_5_5_5_1 (0x8034) packs a pixel as
- * R5 G5 B5 A1 with R in the high bits and A in bit 0. Two empirical facts
- * from testing in Vita3K during combat pin down what the installed vitaGL
- * fast path actually expects:
- *
- *  1. Moving the alpha bit from bit 0 to bit 15 (standard
- *     GL_UNSIGNED_SHORT_1_5_5_5_REV placement) fixed the extreme/incorrect
- *     transparency seen with no conversion at all. Alpha placement alone
- *     was correct in that test — sprites rendered with normal opacity.
- *  2. With alpha only (R,G,B left in original order under it), color was
- *     still wrong: E. Honda's tan skin (R high, B low) rendered solid
- *     blue, while Blanka's green skin (R approx equals B, both low) was
- *     unaffected. Since a pure R/B swap is a no-op exactly when R == B,
- *     this pins the remaining bug down to R and B being swapped.
- *
- * Combining both: alpha at bit 15, and R/G/B in REV order but with R and B
- * swapped relative to the standard RGBA REV layout (i.e. BGRA ordered
- * under the alpha bit). This is a bounded 16-bit-per-pixel repack scoped
- * strictly to this type, done just before the real GL call; it does not
- * touch any other format and does not change VRAM usage. See
- * PORTING_NOTES.md "Problemas conocidos" for the texture corruption this
- * addresses and prior conversions ruled out. */
-static void *convert_5551_for_vitagl(const void *pixels, int width, int height)
+// Use the same explicit byte layout for initial and partial uploads: vitaGL's
+// packed fast path and its subimage converter expect different bit layouts.
+static void *convert_5551_to_rgba8(const void *pixels, int width, int height,
+                                  int alignment)
 {
-    if (!pixels || width <= 0 || height <= 0)
+    if (!pixels)
         return NULL;
-    size_t count = (size_t)width * (size_t)height;
-    uint16_t *converted = (uint16_t *)malloc(count * sizeof(uint16_t));
+    size_t stride, bytes;
+    if (!texture_upload::Layout5551(width, height, alignment, stride, bytes))
+        return NULL;
+    uint8_t *converted = (uint8_t *)malloc(bytes);
     if (!converted) {
-        trace("[GL] 5551 convert: malloc failed for %dx%d\n", width, height);
+        trace("[GL] RGBA8 conversion allocation failed: %dx%d\n", width, height);
         return NULL;
     }
-    const uint16_t *src = (const uint16_t *)pixels;
-    for (size_t i = 0; i < count; i++) {
-        uint16_t px = src[i];
-        uint16_t r = (px >> 11) & 0x1F;
-        uint16_t g = (px >> 6) & 0x1F;
-        uint16_t b = (px >> 1) & 0x1F;
-        uint16_t a = px & 0x1;
-        converted[i] = (uint16_t)((a << 15) | (r << 10) | (g << 5) | b);
-    }
+    texture_upload::Convert5551(pixels, converted, width, height, stride);
     return converted;
 }
 
@@ -628,8 +605,15 @@ void glTexImage2D_compat(unsigned int target, int level, int internal_format,
     static int calls;
     int log_call = calls++ < 48;
     unsigned int sample = 0;
-    if (pixels)
-        memcpy(&sample, pixels, sizeof(sample));
+    if (log_call && pixels && width > 0 && height > 0) {
+        size_t bytes = 1;
+        if (type != GL_UNSIGNED_BYTE) bytes = 2;
+        else if (format == GL_RGBA || format == GL_BGRA) bytes = 4;
+        else if (format == GL_RGB) bytes = 3;
+        else if (format == GL_LUMINANCE_ALPHA) bytes = 2;
+        size_t available = (size_t)width * height * bytes;
+        memcpy(&sample, pixels, available < sizeof(sample) ? available : sizeof(sample));
+    }
     int binding = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
     if (log_call)
@@ -637,13 +621,25 @@ void glTexImage2D_compat(unsigned int target, int level, int internal_format,
               binding,
               target, level, internal_format, width, height, border, format,
               type, pixels, sample);
+    const bool packed = format == GL_RGBA && type == GL_UNSIGNED_SHORT_5_5_5_1;
+    int alignment = 4;
     void *converted = NULL;
-    if (type == GL_UNSIGNED_SHORT_5_5_5_1)
-        converted = convert_5551_for_vitagl(pixels, width, height);
-    glTexImage2D(target, level, internal_format, width, height, border, format,
-                 type, converted ? converted : pixels);
-    if (converted)
+    if (packed && pixels && width > 0 && height > 0) {
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+        converted = convert_5551_to_rgba8(pixels, width, height, alignment);
+        if (!converted)
+            return;
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    }
+    // Allocate RGBA8 even for a null upload so later subimages use that layout.
+    glTexImage2D(target, level, packed ? GL_RGBA8 : internal_format,
+                 width, height, border, format,
+                 packed ? GL_UNSIGNED_BYTE : type, converted ? converted : pixels);
+    if (converted) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
         free(converted);
+    }
+    RenderInterpolationTextureChanged(binding);
     unsigned int error = glGetError();
     if (log_call && error)
         trace("[GL] TexImage2D error=%X\n", error);
@@ -659,13 +655,26 @@ void glTexSubImage2D_compat(unsigned int target, int level, int xoffset,
         trace("[GL] TexSubImage2D target=%X level=%d offset=%d,%d %dx%d format=%X type=%X pixels=%p\n",
               target, level, xoffset, yoffset, width, height, format, type,
               pixels);
+    int alignment = 4;
     void *converted = NULL;
-    if (type == GL_UNSIGNED_SHORT_5_5_5_1)
-        converted = convert_5551_for_vitagl(pixels, width, height);
-    glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type,
+    if (format == GL_RGBA && type == GL_UNSIGNED_SHORT_5_5_5_1 && pixels &&
+        width > 0 && height > 0) {
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+        converted = convert_5551_to_rgba8(pixels, width, height, alignment);
+        if (!converted)
+            return;
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    }
+    glTexSubImage2D(target, level, xoffset, yoffset, width, height, format,
+                    converted ? GL_UNSIGNED_BYTE : type,
                     converted ? converted : pixels);
-    if (converted)
+    if (converted) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
         free(converted);
+    }
+    int binding = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+    RenderInterpolationTextureChanged(binding);
 }
 
 __attribute__((pcs("aapcs")))
@@ -708,6 +717,7 @@ void glBindBuffer_compat(unsigned int target, unsigned int buffer)
     static int calls;
     if (calls++ < 80)
         trace("[GL] BindBuffer target=%X buffer=%u\n", target, buffer);
+    RenderInterpolationBuffer(target, buffer);
     glBindBuffer(target, buffer);
 }
 
@@ -727,6 +737,7 @@ void glVertexPointer_compat(int size, unsigned int type, int stride,
     if (calls++ < 80)
         trace("[GL] VertexPointer size=%d type=%X stride=%d ptr=%p\n",
               size, type, stride, pointer);
+    RenderInterpolationVertex(size, type, stride, pointer);
     glVertexPointer(size, type, stride, pointer);
 }
 
@@ -737,6 +748,7 @@ void glTexCoordPointer_compat(int size, unsigned int type, int stride,
     if (calls++ < 80)
         trace("[GL] TexCoordPointer size=%d type=%X stride=%d ptr=%p\n",
               size, type, stride, pointer);
+    RenderInterpolationTexCoord(size, type, stride, pointer);
     glTexCoordPointer(size, type, stride, pointer);
 }
 
@@ -745,7 +757,9 @@ void glDrawArrays_compat(unsigned int mode, int first, int count)
     static int calls;
     if (calls++ < 80)
         trace("[GL] DrawArrays mode=%X first=%d count=%d\n", mode, first, count);
+    RenderInterpolationDraw(mode, first, count, 0, nullptr);
     glDrawArrays(mode, first, count);
+    RenderInterpolationRestore();
 }
 
 void glDrawElements_compat(unsigned int mode, int count, unsigned int type,
@@ -755,7 +769,9 @@ void glDrawElements_compat(unsigned int mode, int count, unsigned int type,
     if (calls++ < 80)
         trace("[GL] DrawElements mode=%X count=%d type=%X indices=%p\n",
               mode, count, type, indices);
+    RenderInterpolationDraw(mode, 0, count, type, indices);
     glDrawElements(mode, count, type, indices);
+    RenderInterpolationRestore();
 }
 
 void glBindFramebuffer_compat(unsigned int target, unsigned int framebuffer)

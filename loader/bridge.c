@@ -34,6 +34,18 @@ void trace(const char *fmt, ...)
     if (length >= (int)sizeof(message))
         length = sizeof(message) - 1;
 
+    if (!options.debug_log && !strstr(message, "ERROR") &&
+        !strstr(message, "error") && !strstr(message, "WARNING") &&
+        !strstr(message, "warning") && !strstr(message, "FATAL") &&
+        !strstr(message, "failed") && !strstr(message, "missing")) {
+        static const char *verbose[] = {
+            "[Asset]", "[JNI]", "[Format]", "[GL]", "[Text]", "[Game]",
+            "[Touch]", "[TouchXform]", "[Input] buttons=", "[TouchCursor]"
+        };
+        for (size_t i = 0; i < sizeof(verbose) / sizeof(verbose[0]); ++i)
+            if (strncmp(message, verbose[i], strlen(verbose[i])) == 0)
+                return;
+    }
     char line[816];
     int line_length = snprintf(line, sizeof(line), "[t%08X] %s",
                                (unsigned)sceKernelGetThreadId(), message);

@@ -46,6 +46,7 @@ extern "C"
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <psp2/kernel/processmgr.h>
 #include <zlib.h>
 #include <png.h>
 #include <ft2build.h>
@@ -70,6 +71,15 @@ extern "C"
 #define printf trace
 
 #include "softfp_wrappers.hpp"
+#include "battle_camera.h"
+#include "audio_bridge.h"
+#include "movie_player.h"
+#include "debug_replay.h"
+#include "frame_timing.h"
+#include "title_idle_movie.h"
+#include "menu_background.h"
+#include "render_interpolation.h"
+#include "asset_pack.h"
 
 // ============================================================
 // Globals
@@ -85,6 +95,15 @@ static void set_default_options(void)
     options.bilinear = 0;
     options.msaa = 2;
     options.postfx = 0;
+    options.battle_camera = 1;
+    options.debug_touch_cursor = 0;
+    options.debug_input_replay = 0;
+    options.audio = 1;
+    options.debug_log = 0;
+    options.debug_audio_capture = 0;
+    options.smooth_rendering = 1;
+    options.debug_timing = 0;
+    options.intro_movie = 1;
 }
 
 void loadOptions()
@@ -111,6 +130,24 @@ void loadOptions()
                 options.msaa = value;
             else if (strcmp("postfx", key) == 0)
                 options.postfx = value;
+            else if (strcmp("battle_camera", key) == 0)
+                options.battle_camera = value == 0 ? 0 : 1;
+            else if (strcmp("debug_log", key) == 0)
+                options.debug_log = value == 1;
+            else if (strcmp("debug_input_replay", key) == 0)
+                options.debug_input_replay = value == 1;
+            else if (strcmp("audio", key) == 0)
+                options.audio = value == 1;
+            else if (strcmp("debug_audio_capture", key) == 0)
+                options.debug_audio_capture = value == 1;
+            else if (strcmp("smooth_rendering", key) == 0)
+                options.smooth_rendering = value == 1;
+            else if (strcmp("debug_timing", key) == 0)
+                options.debug_timing = value == 1;
+            else if (strcmp("intro_movie", key) == 0)
+                options.intro_movie = value == 1;
+            else if (strcmp("debug_touch_cursor", key) == 0)
+                options.debug_touch_cursor = value == 1 ? 1 : 0;
         }
         fclose(f);
     }
@@ -409,6 +446,33 @@ static void MeasureText(const char *string, int size, int *width, int *height)
 
 // Touch input buffer — 5 touches × 8 shorts = 40 shorts
 static short g_touch_tbl[TOUCH_TBL_SIZE];
+static DebugInput g_debug_input;
+static bool g_debug_input_active;
+static DebugReplay *g_movie_replay;
+static uintptr_t g_title_system;
+
+static bool MovieReplaySkip()
+{
+    if (!options.debug_input_replay || !g_movie_replay) return false;
+    static uint64_t next = 0;
+    uint64_t now = sceKernelGetProcessTimeWide();
+    if (now < next) return false;
+    next = now + 50000;
+    DebugInput input;
+    g_movie_replay->Step(DATA_PATH "/debug-input.txt", input);
+    return input.touch || (input.buttons & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE | SCE_CTRL_START));
+}
+
+static void GuardUnavailableIdleMovie()
+{
+    auto result = title_idle_movie::Install(g_title_system, IntroMovieAvailable(), &kuKernelCpuUnrestrictedMemcpy);
+    if (result == title_idle_movie::Result::Applied) {
+        trace("[Title] Idle intro video disabled: movie playback unavailable\n");
+        so_flush_caches(&sf4ce_mod);
+    } else if (result != title_idle_movie::Result::PlaybackAvailable) {
+        trace("[Title] WARNING: idle movie guard was not installed (%d)\n", (int)result);
+    }
+}
 static uint32_t g_controller_buttons = 0;
 static float g_left_stick_x = 0.0f;
 static float g_left_stick_y = 0.0f;
@@ -437,7 +501,31 @@ static bool HasCompleteLocalAssetPack(void)
         if (i == 0 && info.st_size < 100000)
             return false;
     }
-    return true;
+    FILE *manifest = fopen(DATA_PATH "/demand_assets/_filelist.txt", "r");
+    if (!manifest) return false;
+    asset_pack::Audit audit;
+    char line[512];
+    while (fgets(line, sizeof(line), manifest)) {
+        char *end = strchr(line, ',');
+        if (!end) continue;
+        *end = 0;
+        if (asset_pack::RosterFile(line) < 0) continue;
+        struct stat info;
+        char path[640];
+        snprintf(path, sizeof(path), "%s/demand_assets/%s", DATA_PATH, line);
+        bool exists = stat(path, &info) == 0 && info.st_size > 0;
+        if (!exists) {
+            snprintf(path, sizeof(path), "%s/assets/%s", DATA_PATH, line);
+            exists = stat(path, &info) == 0 && info.st_size > 0;
+        }
+        audit.Add(line, exists);
+        if (!exists && audit.missing <= 16)
+            trace("[Assets] missing combat file: %s\n", line);
+    }
+    fclose(manifest);
+    trace("[Assets] roster verification: files=%u missing=%u primary=0x%08X\n",
+          audit.checked, audit.missing, audit.primary_characters);
+    return audit.Complete();
 }
 
 static float NormalizeStick(uint8_t value)
@@ -487,6 +575,12 @@ static void UpdateControllerInput(const SceCtrlData *pad)
     g_left_stick_y = NormalizeStick(pad->ly);
     g_right_stick_x = NormalizeStick(pad->rx);
     g_right_stick_y = NormalizeStick(pad->ry);
+    if (options.debug_touch_cursor && (pad->buttons & SCE_CTRL_SELECT))
+    {
+        g_controller_buttons = 0;
+        g_left_stick_x = g_left_stick_y = 0.0f;
+        g_right_stick_x = g_right_stick_y = 0.0f;
+    }
 
     /* Keep this bounded: it is useful for confirming Vita3K/hardware button
      * delivery without turning the per-frame log into another bottleneck. */
@@ -553,6 +647,81 @@ static AppIntFunc fp_GetDeviceWidth = NULL;
 static AppIntFunc fp_GetDeviceHeight = NULL;
 static volatile bool g_http_failure_pending = false;
 static void *g_app_main = NULL;
+static uintptr_t fp_PadSettingSystem, fp_PadSettingToPauseSystem;
+static void (*fp_TouchControlDraw[4])(void *);
+static bool TouchControlSetup() {
+    if (!g_app_main) return false;
+    uintptr_t scene = *(const uintptr_t *)((const uint8_t *)g_app_main + 0xdec);
+    return (fp_PadSettingSystem && scene == fp_PadSettingSystem) ||
+           (fp_PadSettingToPauseSystem && scene == fp_PadSettingToPauseSystem);
+}
+template<unsigned Index> static void DrawTouchControlsInSetup(void *pad) {
+    if (TouchControlSetup() && fp_TouchControlDraw[Index]) fp_TouchControlDraw[Index](pad);
+}
+typedef void *(*PerspectiveFunc)(void *, int, int, int, int);
+static PerspectiveFunc fp_Perspective;
+static uintptr_t fp_GameMainSystem, fp_CameraOffsetNone;
+static uint32_t g_simulation_interval_us = frame_timing::kInitialSimulationUs;
+static void (*fp_AppDrawLoop)(void *);
+static bool g_smooth_render_available = false;
+static bool NormalBattleRendering() {
+    if (!g_smooth_render_available || !g_app_main || !fp_AppDrawLoop || !fp_GameMainSystem || !fp_CameraOffsetNone) return false;
+    const uint8_t *app = static_cast<const uint8_t *>(g_app_main);
+    return *(const uintptr_t *)(app + 0xdec) == fp_GameMainSystem &&
+           *(const uintptr_t *)(app + 0x1134) == fp_CameraOffsetNone &&
+           !*(const uintptr_t *)(app + 0xe1c) && !*(const uintptr_t *)(app + 0xe20);
+}
+
+
+static bool g_simulating = true;
+static void (*fp_SystemLoop)(void *), (*fp_FadeLoop)(void *);
+static void (*fp_TouchSet)(void *, short *), (*fp_TouchClear)(void *);
+static void (*fp_ControllerUpdate)(void *);
+static void (*fp_TextUpdate)(), (*fp_CricketUpdate)(), (*fp_NetworkUpdate)();
+static void TimedSystemLoop(void *app) { if (g_simulating) fp_SystemLoop(app); }
+static void TimedFadeLoop(void *app) { if (g_simulating) fp_FadeLoop(app); }
+static void TimedTouchSet(void *touch, short *input) { if (g_simulating) fp_TouchSet(touch, input); }
+static void TimedTouchClear(void *touch) { if (g_simulating) fp_TouchClear(touch); }
+static void TimedControllerUpdate(void *controller) { if (g_simulating) fp_ControllerUpdate(controller); }
+static void TimedTextUpdate() { if (g_simulating) fp_TextUpdate(); }
+static void TimedCricketUpdate() { if (g_simulating) fp_CricketUpdate(); }
+static void TimedNetworkUpdate() { if (g_simulating) fp_NetworkUpdate(); }
+
+static void DrawLoopWithInterpolationGuard(void *app) {
+    // SystemLoop can enter a cinematic or pause on this very tick. Recheck
+    // after it has run, before capturing any geometry or camera history.
+    if (!NormalBattleRendering()) RenderInterpolationBegin(false, true, 1);
+    fp_AppDrawLoop(app);
+}
+
+static void *ConsolePerspective(void *matrix, int fov, int aspect, int near_z, int far_z)
+{
+    static int current_fov = battle_camera::kFovBam;
+    if (g_app_main && matrix == (uint8_t *)g_app_main + 0xe34) {
+        uint8_t *app = (uint8_t *)g_app_main;
+        bool normal_battle = *(uintptr_t *)(app + 0xdec) == fp_GameMainSystem &&
+                             *(uintptr_t *)(app + 0x1134) == fp_CameraOffsetNone;
+        void *first = *(void **)(app + 0x1174);
+        void *second = *(void **)(app + 0x1178);
+        int desired = battle_camera::kFovBam;
+        if (normal_battle && first && second) {
+            int y1 = *(int32_t *)((uint8_t *)first + 0x48);
+            int y2 = *(int32_t *)((uint8_t *)second + 0x48);
+            int x1 = *(int32_t *)((uint8_t *)first + 0x44);
+            int x2 = *(int32_t *)((uint8_t *)second + 0x44);
+            desired = battle_camera::FovForBounds(x1, y1, x2, y2);
+            if (options.debug_input_replay && desired != current_fov)
+                trace("[Camera] bounds x=%d,%d y=%d,%d fov=%d target=%d\n", x1, x2, y1, y2, current_fov, desired);
+            current_fov = battle_camera::ApproachFov(current_fov, desired);
+            fov = current_fov;
+        } else {
+            // Preserve the projection requested by native cinematic cameras.
+            current_fov = battle_camera::kFovBam;
+        }
+    }
+    return fp_Perspective(matrix, fov, aspect, near_z, far_z);
+}
+
 
 typedef void (*NetworkCompletionFunc)(void);
 static volatile NetworkCompletionFunc g_network_completion_pending = NULL;
@@ -596,7 +765,7 @@ static bool InstallOfflineMainMenu(uintptr_t create_main_panel,
                                    uintptr_t create_sub_menu)
 {
     /* This table belongs to ST_CreateModeSelectMainPanel in the Android
-     * 1.00.01 binary.  IDs 12 and 13 dispatch to the Store and Battle
+     * supported ARMv7 binary.  IDs 12 and 13 dispatch to the Store and Battle
      * panels.  Compacting those two entries out removes the unavailable
      * online categories while keeping Solo Play, Other and all local items.
      *
@@ -735,10 +904,84 @@ extern "C" int vita_sound_check(void *sound, int port)
     return 0;
 }
 
+static void InstallMutedAudio(so_module *module)
+{
+    hook_addr(so_symbol(module, "CkUpdate"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "CkSuspend"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "CkResume"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "CkShutdown"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN8SoundObj9SoundInitEv"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN8SoundObj8FileLoadEPKci"),
+              (uintptr_t)&vita_sound_file_load);
+    hook_addr(so_symbol(module, "_ZN8SoundObj10SoundCheckEi"),
+              (uintptr_t)&vita_sound_check);
+    hook_addr(so_symbol(module, "_ZN8SoundObj14RequestPlayBGMEi"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN8SoundObj14RequestPlayBGMEii"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN8SoundObj16RequestPlayBGMExEii"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN8SoundObj12SoundPlayBGMEv"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN8SoundObj12SoundStopBGMEb"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN7AppMain10RequestBGMEib"),
+              (uintptr_t)&vita_ck_audio_noop);
+    static const char *muted_sound_methods[] = {
+        "_ZN8SoundObj10SoundPitchEif", "_ZN8SoundObj10SoundResetEv",
+        "_ZN8SoundObj11SoundPlaySEEv", "_ZN8SoundObj11SoundResumeEv",
+        "_ZN8SoundObj11SoundStopSEEb", "_ZN8SoundObj11SoundStopSEEib",
+        "_ZN8SoundObj11SoundVolumeEif", "_ZN8SoundObj11bPortSearchEb",
+        "_ZN8SoundObj12ClearAllPortEv", "_ZN8SoundObj12DeleteBufferEi",
+        "_ZN8SoundObj12DeleteSourceEi", "_ZN8SoundObj12SoundPauseSEEb",
+        "_ZN8SoundObj12SoundReleaseEv", "_ZN8SoundObj12SoundStopAllEv",
+        "_ZN8SoundObj12SoundSuspendEv", "_ZN8SoundObj13RequestCancelEi",
+        "_ZN8SoundObj13RequestCancelEii", "_ZN8SoundObj13RequestPlaySEEi",
+        "_ZN8SoundObj13RequestPlaySEEii", "_ZN8SoundObj13RequestPlaySEEiib",
+        "_ZN8SoundObj13RequestSearchEi", "_ZN8SoundObj13SoundNoSearchEi",
+        "_ZN8SoundObj13SoundPauseBGMEb", "_ZN8SoundObj13SoundVolumeSEEf",
+        "_ZN8SoundObj13setCharCkBankEPKcb",
+        "_ZN8SoundObj14SoundVolumeBGMEf", "_ZN8SoundObj15DeleteAllSourceEv",
+        "_ZN8SoundObj15SoundPlaySearchEi", "_ZN8SoundObj15SoundPortPlayNoEi",
+        "_ZN8SoundObj15SoundStopSearchEi", "_ZN8SoundObj15SoundStopSearchEib",
+        "_ZN8SoundObj17CreateSoundBufferEv", "_ZN8SoundObj17DeleteSoundBufferEv",
+        "_ZN8SoundObj17RequestCancelPortEi", "_ZN8SoundObj17SoundMasterVolumeEif",
+        "_ZN8SoundObj18SoundSuspendStopSEEv", "_ZN8SoundObj19SoundMasterVolumeSEEf",
+        "_ZN8SoundObj19SoundSuspendStopBGMEv",
+        "_ZN8SoundObj20RequestPortFixPlaySEEii",
+        "_ZN8SoundObj20SoundMasterVolumeBGMEf", "_ZN8SoundObj9ClearPortEi",
+        "_ZN8SoundObj9SoundSeekEif", "_ZN8SoundObj9SoundStopEi",
+        "_ZN8SoundObj9SoundStopEib",
+    };
+    for (const char *symbol : muted_sound_methods)
+    {
+        uintptr_t address = so_symbol(module, symbol);
+        if (address)
+            hook_addr(address, (uintptr_t)&vita_sound_check);
+    }
+    hook_addr(so_symbol(module, "_ZN8SoundObj15GetMasterVolumeEi"),
+              (uintptr_t)&vita_ck_audio_zero);
+    hook_addr(so_symbol(module, "_ZN8SoundObj18GetMasterVolumeBGMEv"),
+              (uintptr_t)&vita_ck_audio_zero);
+    hook_addr(so_symbol(module, "_ZN3Cki5Sound9updateAllEv"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZN3Cki5Sound6updateEv"),
+              (uintptr_t)&vita_ck_audio_noop);
+    hook_addr(so_symbol(module, "_ZNK3Cki5Sound14getMixedVolumeEv"),
+              (uintptr_t)&vita_ck_audio_zero);
+    hook_addr(so_symbol(module, "_ZNK3Cki5Sound14getFinalVolumeEv"),
+              (uintptr_t)&vita_ck_audio_zero);
+}
+
 extern "C" int vita_controller_connected(void *controller)
 {
     (void)controller;
-    return 1;
+    return !TouchControlSetup();
 }
 
 extern "C" void vita_gamepad_draw_noop(void *gamepad)
@@ -853,6 +1096,8 @@ static jint JavaVMGetEnv(void *vm, void **env, jint version)
     *env = fake_env;
     return 0;
 }
+
+static jint JavaVMDetach(void *) { return 0; }
 
 // JNI function implementations
 static jclass FindClass(void *env, const char *name)
@@ -1294,7 +1539,17 @@ static void CallStaticVoidMethodV(void *env, jclass clazz, jmethodID methodID, u
     const char *name = (const char *)methodID;
     if (!name)
         return;
-    if (!strcmp(name, "DPrint")) {
+    if (!strcmp(name, "MoviePlay")) {
+        // MovieObj stops game sounds and owns the return-to-title transition.
+        if (!PlayIntroMovie(SCREEN_W, SCREEN_H, options.audio, MovieReplaySkip))
+            GuardUnavailableIdleMovie();
+    } else if (!strcmp(name, "setAnimationInterval") || !strcmp(name, "FrameIntervalSet")) {
+        uint32_t interval = args ? frame_timing::NativeInterval(static_cast<int>(args[0]), !strcmp(name, "setAnimationInterval")) : 0;
+        if (interval) {
+            g_simulation_interval_us = interval;
+            trace("[Timing] native %s(%d): %u us/update\n", name, static_cast<int>(args[0]), interval);
+        }
+    } else if (!strcmp(name, "DPrint")) {
         trace("[Game] %s\n", args && args[0] ? (const char *)args[0] : "(null)");
     } else if (!strcmp(name, "TextInit")) {
         int width = args ? (int)args[0] : 0;
@@ -1680,6 +1935,10 @@ static jboolean CallStaticBooleanMethodV(void *env, jclass clazz, jmethodID meth
         !strcmp(name, "isDownLoadedAssetPack") ||
         !strncmp(name, "checkPermission", 15))
         return 1;
+    if (!strcmp(name, "isMovieExist"))
+        return IntroMovieAvailable();
+    if (!strcmp(name, "isPlayMovie"))
+        return IntroMoviePlaying();
     if (!strcmp(name, "isFileExist")) {
         const char *filename = args ? (const char *)args[0] : NULL;
         void *asset = vita_asset_open(filename, 2, NULL);
@@ -1768,6 +2027,8 @@ void InitJNIEnv(void)
 
     memset(fake_vm, 0, sizeof(fake_vm));
     *(uintptr_t *)(fake_vm + 0x00) = (uintptr_t)fake_vm;
+    *(uintptr_t *)(fake_vm + 0x10) = (uintptr_t)JavaVMGetEnv;
+    *(uintptr_t *)(fake_vm + 0x14) = (uintptr_t)JavaVMDetach;
     *(uintptr_t *)(fake_vm + 0x18) = (uintptr_t)JavaVMGetEnv;
 
     // JNI vtable offsets (based on Android ARM32 JNIEnv layout)
@@ -2227,6 +2488,46 @@ void mapVitaInputToTouch(SceCtrlData *pad)
     SceTouchData touch;
     memset(&touch, 0, sizeof(touch));
     sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
+    if (g_debug_input_active) {
+        memset(&touch, 0, sizeof(touch));
+        if (g_debug_input.touch) {
+            touch.reportNum = 1;
+            touch.report[0].x = g_debug_input.x * 2;
+            touch.report[0].y = g_debug_input.y * 2;
+        }
+    }
+
+
+    // Optional diagnostic pointer: hold Select, move with the D-pad and tap
+    // Cross. This travels through the same Android touch bridge as the panel,
+    // and makes touchscreen-only menus testable using a keyboard/controller.
+    static int cursor_x = 480;
+    static int cursor_y = 272;
+    if (options.debug_touch_cursor && (pad->buttons & SCE_CTRL_SELECT))
+    {
+        if (pad->buttons & SCE_CTRL_LEFT) cursor_x -= 8;
+        if (pad->buttons & SCE_CTRL_RIGHT) cursor_x += 8;
+        if (pad->buttons & SCE_CTRL_UP) cursor_y -= 8;
+        if (pad->buttons & SCE_CTRL_DOWN) cursor_y += 8;
+        if (cursor_x < 0) cursor_x = 0;
+        if (cursor_x > 959) cursor_x = 959;
+        if (cursor_y < 0) cursor_y = 0;
+        if (cursor_y > 543) cursor_y = 543;
+        memset(&touch, 0, sizeof(touch));
+        if (pad->buttons & SCE_CTRL_CROSS)
+        {
+            touch.reportNum = 1;
+            touch.report[0].x = cursor_x * 2;
+            touch.report[0].y = cursor_y * 2;
+        }
+        static int last_x = -1, last_y = -1;
+        if (cursor_x != last_x || cursor_y != last_y)
+        {
+            trace("[TouchCursor] %d,%d\n", cursor_x, cursor_y);
+            last_x = cursor_x;
+            last_y = cursor_y;
+        }
+    }
 
     short *slot = &g_touch_tbl[0];
     if (touch.reportNum > 0)
@@ -2842,76 +3143,11 @@ int main_thread(SceSize args, void *argp)
               (uintptr_t)&vita_ck_mem_init);
     hook_addr(so_symbol(&sf4ce_mod, "_ZN3Cki3Mem8shutdownEv"),
               (uintptr_t)&vita_ck_mem_shutdown);
-    hook_addr(so_symbol(&sf4ce_mod, "CkUpdate"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "CkSuspend"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "CkResume"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "CkShutdown"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj9SoundInitEv"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj8FileLoadEPKci"),
-              (uintptr_t)&vita_sound_file_load);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj10SoundCheckEi"),
-              (uintptr_t)&vita_sound_check);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj14RequestPlayBGMEi"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj14RequestPlayBGMEii"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj16RequestPlayBGMExEii"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj12SoundPlayBGMEv"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj12SoundStopBGMEb"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN7AppMain10RequestBGMEib"),
-              (uintptr_t)&vita_ck_audio_noop);
-    static const char *muted_sound_methods[] = {
-        "_ZN8SoundObj10SoundPitchEif", "_ZN8SoundObj10SoundResetEv",
-        "_ZN8SoundObj11SoundPlaySEEv", "_ZN8SoundObj11SoundResumeEv",
-        "_ZN8SoundObj11SoundStopSEEb", "_ZN8SoundObj11SoundStopSEEib",
-        "_ZN8SoundObj11SoundVolumeEif", "_ZN8SoundObj11bPortSearchEb",
-        "_ZN8SoundObj12ClearAllPortEv", "_ZN8SoundObj12DeleteBufferEi",
-        "_ZN8SoundObj12DeleteSourceEi", "_ZN8SoundObj12SoundPauseSEEb",
-        "_ZN8SoundObj12SoundReleaseEv", "_ZN8SoundObj12SoundStopAllEv",
-        "_ZN8SoundObj12SoundSuspendEv", "_ZN8SoundObj13RequestCancelEi",
-        "_ZN8SoundObj13RequestCancelEii", "_ZN8SoundObj13RequestPlaySEEi",
-        "_ZN8SoundObj13RequestPlaySEEii", "_ZN8SoundObj13RequestPlaySEEiib",
-        "_ZN8SoundObj13RequestSearchEi", "_ZN8SoundObj13SoundNoSearchEi",
-        "_ZN8SoundObj13SoundPauseBGMEb", "_ZN8SoundObj13SoundVolumeSEEf",
-        "_ZN8SoundObj13setCharCkBankEPKcb",
-        "_ZN8SoundObj14SoundVolumeBGMEf", "_ZN8SoundObj15DeleteAllSourceEv",
-        "_ZN8SoundObj15SoundPlaySearchEi", "_ZN8SoundObj15SoundPortPlayNoEi",
-        "_ZN8SoundObj15SoundStopSearchEi", "_ZN8SoundObj15SoundStopSearchEib",
-        "_ZN8SoundObj17CreateSoundBufferEv", "_ZN8SoundObj17DeleteSoundBufferEv",
-        "_ZN8SoundObj17RequestCancelPortEi", "_ZN8SoundObj17SoundMasterVolumeEif",
-        "_ZN8SoundObj18SoundSuspendStopSEEv", "_ZN8SoundObj19SoundMasterVolumeSEEf",
-        "_ZN8SoundObj19SoundSuspendStopBGMEv",
-        "_ZN8SoundObj20RequestPortFixPlaySEEii",
-        "_ZN8SoundObj20SoundMasterVolumeBGMEf", "_ZN8SoundObj9ClearPortEi",
-        "_ZN8SoundObj9SoundSeekEif", "_ZN8SoundObj9SoundStopEi",
-        "_ZN8SoundObj9SoundStopEib",
-    };
-    for (const char *symbol : muted_sound_methods)
-    {
-        uintptr_t address = so_symbol(&sf4ce_mod, symbol);
-        if (address)
-            hook_addr(address, (uintptr_t)&vita_sound_check);
-    }
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj15GetMasterVolumeEi"),
-              (uintptr_t)&vita_ck_audio_zero);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN8SoundObj18GetMasterVolumeBGMEv"),
-              (uintptr_t)&vita_ck_audio_zero);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN3Cki5Sound9updateAllEv"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZN3Cki5Sound6updateEv"),
-              (uintptr_t)&vita_ck_audio_noop);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZNK3Cki5Sound14getMixedVolumeEv"),
-              (uintptr_t)&vita_ck_audio_zero);
-    hook_addr(so_symbol(&sf4ce_mod, "_ZNK3Cki5Sound14getFinalVolumeEv"),
-              (uintptr_t)&vita_ck_audio_zero);
+    bool audio_installed = options.audio && InstallAudioBridge(&sf4ce_mod, fake_vm);
+    printf("[Audio] backend: %s\n", audio_installed ? "Cricket/Vita PCM" :
+           options.audio ? "unsupported library; muted fallback" : "disabled");
+    if (!audio_installed)
+        InstallMutedAudio(&sf4ce_mod);
 
     uintptr_t get_app_main = so_symbol(
         &sf4ce_mod, "_ZN7AppMain11getInstanceEv");
@@ -2950,6 +3186,12 @@ int main_thread(SceSize args, void *argp)
         &sf4ce_mod, "_ZN7GamePad22DrawGameControllerIconEv");
     uintptr_t cockpit_image_rects = so_symbol(
         &sf4ce_mod, "ciImgRectCockpit");
+    uintptr_t battle_camera_init = so_symbol(
+        &sf4ce_mod, "_Z16BattleCameraInitv");
+    uintptr_t camera_direction_set = so_symbol(
+        &sf4ce_mod, "_Z18CameraDirectionSetv");
+    uintptr_t camera_view_set = so_symbol(
+        &sf4ce_mod, "_Z13CameraViewSetb");
     fp_GetTouchPosX = (TouchPosFunc)so_symbol(
         &sf4ce_mod, "_ZN8TouchObj12getTouchPosXEi");
     fp_GetTouchPosY = (TouchPosFunc)so_symbol(
@@ -2987,16 +3229,73 @@ int main_thread(SceSize args, void *argp)
     if (controller_is_connected)
         hook_addr(controller_is_connected,
                   (uintptr_t)&vita_controller_connected);
-    if (gamepad_draw_button)
-        hook_addr(gamepad_draw_button, (uintptr_t)&vita_gamepad_draw_noop);
-    if (gamepad_draw_guid)
-        hook_addr(gamepad_draw_guid, (uintptr_t)&vita_gamepad_draw_noop);
-    if (gamepad_draw_stick)
-        hook_addr(gamepad_draw_stick, (uintptr_t)&vita_gamepad_draw_noop);
-    if (gamepad_draw_controller_icon)
-        hook_addr(gamepad_draw_controller_icon,
-                  (uintptr_t)&vita_gamepad_draw_noop);
+    fp_PadSettingSystem = so_symbol(&sf4ce_mod, "_ZN7AppMain19ST_PadSettingSystemEv");
+    fp_PadSettingToPauseSystem = so_symbol(&sf4ce_mod, "_ZN7AppMain26ST_PadSettingToPauseSystemEv");
+    const char *draw_names[] = {"_ZN7GamePad10DrawButtonEv", "_ZN7GamePad8DrawGuidEv",
+        "_ZN7GamePad9DrawStickEv", "_ZN7GamePad22DrawGameControllerIconEv"};
+    uintptr_t draw_wrappers[] = {(uintptr_t)DrawTouchControlsInSetup<0>,
+        (uintptr_t)DrawTouchControlsInSetup<1>, (uintptr_t)DrawTouchControlsInSetup<2>,
+        (uintptr_t)DrawTouchControlsInSetup<3>};
+    for (unsigned i = 0; i < 4; ++i) {
+        fp_TouchControlDraw[i] = (void (*)(void *))so_symbol(&sf4ce_mod, draw_names[i]);
+        if (fp_TouchControlDraw[i]) so_redirect_plt(&sf4ce_mod, draw_names[i], draw_wrappers[i]);
+    }
     bool cockpit_pause_hidden = HideCockpitPauseButton(cockpit_image_rects);
+    bool battle_camera_installed = options.battle_camera &&
+        battle_camera::Install(battle_camera_init, camera_direction_set,
+                               camera_view_set, &kuKernelCpuUnrestrictedMemcpy);
+    fp_Perspective = (PerspectiveFunc)so_symbol(&sf4ce_mod, "_ZN10OGL_MATRIX14PerspectiveFovEiiii");
+    fp_AppDrawLoop = (void (*)(void *))so_symbol(&sf4ce_mod, "_ZN7AppMain8DrawLoopEv");
+    fp_GameMainSystem = so_symbol(&sf4ce_mod, "_ZN7AppMain17ST_GameMainSystemEv");
+    fp_CameraOffsetNone = so_symbol(&sf4ce_mod, "_Z16CameraOffsetNonev");
+    if (battle_camera_installed && fp_Perspective && fp_GameMainSystem && fp_CameraOffsetNone)
+        printf("[Camera] adaptive projection imports: %d\n", so_redirect_plt(
+            &sf4ce_mod, "_ZN10OGL_MATRIX14PerspectiveFovEiiii", (uintptr_t)ConsolePerspective));
+
+    static const uint8_t rendering_build_id[20] = {
+        0x52, 0x0f, 0xc2, 0xea, 0x2d, 0xf8, 0x98, 0xa6, 0x82, 0x74,
+        0x2a, 0x3f, 0x9b, 0xa7, 0xa2, 0x2f, 0x18, 0x5f, 0xa9, 0xe7
+    };
+    if (options.smooth_rendering && fp_AppDrawLoop && fp_GameMainSystem &&
+        fp_CameraOffsetNone && sf4ce_mod.build_id_size == sizeof(rendering_build_id) &&
+        !memcmp(sf4ce_mod.build_id, rendering_build_id, sizeof(rendering_build_id))) {
+        struct TimingImport { const char *name; uintptr_t wrapper; void *original; };
+        TimingImport imports[] = {
+            {"_ZN7AppMain10SystemLoopEv", (uintptr_t)TimedSystemLoop, &fp_SystemLoop},
+            {"_ZN7AppMain8FadeLoopEv", (uintptr_t)TimedFadeLoop, &fp_FadeLoop},
+            {"_ZN6CTouch8TouchSetEPs", (uintptr_t)TimedTouchSet, &fp_TouchSet},
+            {"_ZN8TouchObj15TouchStateClearEv", (uintptr_t)TimedTouchClear, &fp_TouchClear},
+            {"_ZN19AndroidGCController13updateKeyDataEv", (uintptr_t)TimedControllerUpdate, &fp_ControllerUpdate},
+            {"_Z10TextUpdatev", (uintptr_t)TimedTextUpdate, &fp_TextUpdate},
+            {"CkUpdate", (uintptr_t)TimedCricketUpdate, &fp_CricketUpdate},
+            {"_Z20updateNetworkConnectv", (uintptr_t)TimedNetworkUpdate, &fp_NetworkUpdate}
+        };
+        bool complete = true;
+        for (auto &entry : imports) {
+            uintptr_t original = so_symbol(&sf4ce_mod, entry.name);
+            memcpy(entry.original, &original, sizeof(original));
+            complete = complete && original;
+        }
+        if (complete) {
+            for (auto &entry : imports)
+                complete = (so_redirect_plt(&sf4ce_mod, entry.name, entry.wrapper) > 0) && complete;
+            complete = (so_redirect_plt(&sf4ce_mod, "_ZN7AppMain8DrawLoopEv",
+                (uintptr_t)DrawLoopWithInterpolationGuard) > 0) && complete;
+        }
+        g_smooth_render_available = complete;
+    }
+    printf("[Timing] interpolated combat rendering: %s\n",
+           g_smooth_render_available ? "60 Hz target" : "native cadence");
+
+    g_title_system = title_system;
+    InitIntroMovie(options.intro_movie);
+    GuardUnavailableIdleMovie();
+
+    bool menu_background_disabled = menu_background::Install(so_symbol(
+        &sf4ce_mod, "_ZN7AppMain24ST_NewModeSelectVSUpdateEv"),
+        &kuKernelCpuUnrestrictedMemcpy);
+    printf("[Menu] background replay: %s\n", menu_background_disabled ? "disabled" : "WARNING: signature mismatch");
+
     bool offline_menu_installed =
         InstallOfflineMainMenu(create_mode_select_main_panel,
                                create_mode_select_sub_menu);
@@ -3021,6 +3320,14 @@ int main_thread(SceSize args, void *argp)
     {
         printf("[Input] WARNING: incomplete controller/overlay bridge\n");
     }
+    if (!options.battle_camera)
+        printf("[Camera] original Android framing selected\n");
+    else if (battle_camera_installed)
+        printf("[Camera] console framing: FOV=%.2f height=%u distance=170\n",
+               battle_camera::kFovBam * 360.0 / 4096.0,
+               (unsigned)(battle_camera::kTargetHeight / 4096));
+    else
+        printf("[Camera] WARNING: console framing was not installed\n");
     printf("[SF4CE] Touch transform probes: pos=%p/%p mode=%p/%p "
            "zoom=%p/%p scale=%p device=%p/%p\n",
            (void *)fp_GetTouchPosX, (void *)fp_GetTouchPosY,
@@ -3042,6 +3349,13 @@ int main_thread(SceSize args, void *argp)
         jint version = jni_on_load(fake_vm, NULL);
         ClearLocalRefs();
         printf("[SF4CE] JNI_OnLoad -> 0x%08X\n", version);
+    }
+
+    if (audio_installed && !InitAudioBridge()) {
+        printf("[Audio] initialization failed; continuing with muted fallback\n");
+        InstallMutedAudio(&sf4ce_mod);
+        so_flush_caches(&sf4ce_mod);
+        audio_installed = false;
     }
 
     // Resolve JNI function pointers
@@ -3067,8 +3381,15 @@ int main_thread(SceSize args, void *argp)
     printf("  receive_buf: 0x%08X (%d bytes)\n", (unsigned int)g_receive_buf, RECEIVE_BUF_SIZE);
 
     // Initialize vitaGL
-    int has_low_res = vglInitExtended(0, SCREEN_W, SCREEN_H,
-                                      MEMORY_VITAGL_THRESHOLD_MB * 1024 * 1024, SCE_GXM_MULTISAMPLE_4X);
+    const SceGxmMultisampleMode aa_modes[] = {
+        SCE_GXM_MULTISAMPLE_NONE, SCE_GXM_MULTISAMPLE_2X, SCE_GXM_MULTISAMPLE_4X
+    };
+    int aa_option = options.msaa >= 0 && options.msaa <= 2 ? options.msaa : 2;
+    // Leave physically contiguous memory for the hardware video decoder.
+    int has_low_res = vglInitWithCustomThreshold(IntroMovieAvailable() ? 64 * 1024 : 0, SCREEN_W, SCREEN_H,
+        MEMORY_VITAGL_THRESHOLD_MB * 1024 * 1024, 0,
+        IntroMovieAvailable() ? 32 * 1024 * 1024 : 0,
+        0x8C6000, aa_modes[aa_option]); // vitaGL's standard dialog reserve
     if (has_low_res)
     {
         SCREEN_W = DEF_SCREEN_W;
@@ -3098,8 +3419,9 @@ int main_thread(SceSize args, void *argp)
     // ============================================================
     // Main loop
     // ============================================================
-    uint64_t prev_time = 0;
-    const uint64_t frame_interval_us = FRAME_INTERVAL_US;
+    uint64_t next_simulation = 0, stats_start = 0, simulated = 0, presented = 0;
+    uint64_t stats_interpolated = 0, update_cost = 0, draw_cost = 0;
+    frame_timing::Clock presentation(frame_timing::kRenderHz);
     char name_marker_path[512];
     snprintf(name_marker_path, sizeof(name_marker_path),
              "%s/.vita_name_entry_confirmed", DATA_PATH);
@@ -3108,31 +3430,65 @@ int main_thread(SceSize args, void *argp)
 
     printf("[SF4CE] Starting main loop...\n");
 
+    typedef int (*RosterFunc)(void *, int *, bool);
+    RosterFunc get_roster = (RosterFunc)so_symbol(&sf4ce_mod, "_ZN7AppMain18getCanUseCharaListEPib");
+    bool roster_logged = false;
+    DebugReplay replay;
+    g_movie_replay = &replay;
+
     while (1)
     {
-        // Get current time
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        uint64_t now_us = (uint64_t)ts.tv_sec * 1000000 +
-                          (uint64_t)ts.tv_nsec / 1000;
-
-        // Throttle to frame_interval
-        if (prev_time > 0)
-        {
-            uint64_t elapsed = now_us - prev_time;
-            if (elapsed < frame_interval_us)
-            {
-                sceKernelDelayThread(frame_interval_us - elapsed);
-                continue;
-            }
+        uint64_t now_us = sceKernelGetProcessTimeWide();
+        bool smooth = options.smooth_rendering && NormalBattleRendering();
+        uint64_t deadline = smooth ? presentation.Deadline() : next_simulation;
+        if (deadline > now_us) {
+            sceKernelDelayThread(static_cast<unsigned>(deadline - now_us));
+            continue;
         }
-        prev_time = now_us;
+        bool simulation = !next_simulation || now_us >= next_simulation;
+        if (!simulation && !smooth) continue;
+        presentation.Advance(now_us);
+        if (!stats_start) stats_start = now_us;
+        if (options.debug_timing && now_us - stats_start >= 5000000) {
+            double seconds = (now_us - stats_start) / 1000000.0;
+            uint64_t draws = RenderInterpolationDraws();
+            trace("[Timing] %.3f s: updates=%llu (%.2f Hz), presents=%llu (%.2f Hz), update=%.2f ms draw-only=%.2f ms, interpolated=%llu cache=%u KiB normal=%d interval=%u\n",
+                  seconds, simulated, simulated / seconds, presented, presented / seconds,
+                  simulated ? update_cost / (1000.0 * simulated) : 0.0,
+                  presented > simulated ? draw_cost / (1000.0 * (presented - simulated)) : 0.0,
+                  draws - stats_interpolated, static_cast<unsigned>(RenderInterpolationMemory() / 1024), smooth, g_simulation_interval_us);
+            stats_start = now_us; simulated = presented = update_cost = draw_cost = 0;
+            stats_interpolated = draws;
+        }
+        g_simulating = simulation;
+        RenderInterpolationBegin(smooth, simulation,
+            simulation ? 0.0f : frame_timing::Alpha(now_us, next_simulation, g_simulation_interval_us));
+        if (!simulation) {
+            // Preserve NativeUpdate's framebuffer bind and final composition.
+            // The PLT gates omit simulation/input/audio work on these frames.
+            if (fp_NativeUpdate) fp_NativeUpdate(fake_env, nullptr, g_touch_tbl);
+            if (fp_NativeDraw) fp_NativeDraw(fake_env, nullptr);
+            ClearLocalRefs();
+            vglSwapBuffers(GL_FALSE);
+            ++presented; draw_cost += sceKernelGetProcessTimeWide() - now_us;
+            continue;
+        }
+        const uint32_t scheduled_interval = g_simulation_interval_us;
+        next_simulation = frame_timing::NextSimulation(next_simulation, now_us, scheduled_interval);
 
         // Read Vita controls
         SceCtrlData pad = {};
         int ctrl_samples = sceCtrlPeekBufferPositiveExt2(0, &pad, 1);
-        if (ctrl_samples <= 0)
+        if (ctrl_samples <= 0) {
             memset(&pad, 0, sizeof(pad));
+            pad.lx = pad.ly = pad.rx = pad.ry = 128;
+        }
+        g_debug_input_active = options.debug_input_replay &&
+            replay.Step(DATA_PATH "/debug-input.txt", g_debug_input);
+        if (g_debug_input_active) {
+            pad.buttons = g_debug_input.buttons;
+            pad.lx = pad.ly = pad.rx = pad.ry = 128;
+        }
         UpdateControllerInput(&pad);
 
         // Map Vita input to touch coordinates
@@ -3183,6 +3539,14 @@ int main_thread(SceSize args, void *argp)
                 trace("[SF4CE] Boot resources ready; entering original title scene\n");
                 fp_SetSceneTitle(g_app_main);
             }
+        }
+
+        if (options.debug_input_replay && title_scene_restored && !roster_logged && get_roster) {
+            int characters[64] = {};
+            int unrestricted = get_roster(g_app_main, characters, false);
+            int selectable = get_roster(g_app_main, characters, true);
+            trace("[Roster] native list total=%d selectable=%d\n", unrestricted, selectable);
+            roster_logged = true;
         }
 
         UpdateIme();
@@ -3283,6 +3647,10 @@ int main_thread(SceSize args, void *argp)
 
         // Swap buffers
         vglSwapBuffers(GL_FALSE);
+        if (scheduled_interval != g_simulation_interval_us)
+            next_simulation = now_us + g_simulation_interval_us;
+        ++simulated; ++presented;
+        update_cost += sceKernelGetProcessTimeWide() - now_us;
 
     }
 

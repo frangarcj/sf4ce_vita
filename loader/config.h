@@ -28,17 +28,21 @@
 #define TOUCH_MAX 5
 #define TOUCH_TBL_SIZE (TOUCH_MAX * 8) // 40 shorts
 
-// SF4 CE advances its game simulation once per renderer update.  The Android
-// release targets a 20 Hz update cadence; driving it at 60 Hz makes gameplay
-// run three times too fast.
-#define FRAME_INTERVAL_US 50000
-
 typedef struct
 {
     int res;
     int bilinear;
     int msaa;
     int postfx;
+    int battle_camera;
+    int debug_touch_cursor;
+    int audio;
+    int debug_audio_capture;
+    int debug_input_replay;
+    int debug_log;
+    int smooth_rendering;
+    int debug_timing;
+    int intro_movie;
 } config_opts;
 extern config_opts options;
 

@@ -1,0 +1,44 @@
+# Leave the title untouched for about three minutes, then enter combat.
+# The 600-update idle/movie threshold must not hide or disable the title.
+# Set intro_movie=0: leave title idle for ~3 minutes, then E.Honda vs Sagat.
+# Updates run at 20 Hz. Select a portrait twice to confirm a new character.
+wait 3600
+tap 480 272 2
+wait 320
+tap 700 480 2
+wait 50
+tap 700 480 2
+wait 350
+tap 400 328 2
+wait 10
+tap 400 328 2
+wait 10
+tap 190 430 2
+wait 10
+tap 735 328 2
+wait 10
+tap 735 328 2
+wait 10
+tap 680 430 2
+wait 800
+pad 20 40
+wait 20
+pad 4000 4
+wait 20
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+wait 400

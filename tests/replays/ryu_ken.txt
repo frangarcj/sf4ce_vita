@@ -1,0 +1,23 @@
+wait 240
+tap 480 272 2
+wait 320
+tap 700 480 2
+wait 50
+tap 700 480 2
+wait 240
+tap 320 328 2
+wait 10
+tap 190 430 2
+wait 10
+tap 315 430 2
+wait 10
+tap 680 430 2
+wait 500
+pad 20 32
+wait 20
+pad 4000 3
+wait 30
+pad 10 12
+wait 10
+pad 4000 3
+wait 30

@@ -1,1 +1,16 @@
 build/
+__pycache__/
+*.pyc
+# Local game data and visual references must never enter the repository.
+*.apk
+*.xapk
+*.obb
+*.so
+*.obm
+*.ckb
+*.cks
+*.mp4
+/android*.png
+/ps3.png
+/assets/
+/demand_assets/

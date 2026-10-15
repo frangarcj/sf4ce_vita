@@ -281,7 +281,38 @@ int so_load(so_module *mod, const char *filename, uintptr_t load_addr)
     }
   }
 
+  /* Keep the build ID before releasing the file image and section headers. */
+  mod->build_id_size = 0;
+  for (int i = 0; i < mod->ehdr->e_shnum; ++i) {
+    const Elf32_Shdr *section = &mod->shdr[i];
+    if (section->sh_type != SHT_NOTE || section->sh_size < sizeof(Elf32_Nhdr) ||
+        section->sh_offset > so_size || section->sh_size > so_size - section->sh_offset)
+      continue;
+    const uint8_t *note = (const uint8_t *)so_data + section->sh_offset;
+    size_t left = section->sh_size;
+    while (left >= sizeof(Elf32_Nhdr)) {
+      const Elf32_Nhdr *header = (const Elf32_Nhdr *)note;
+      size_t name_size = ALIGN_MEM((size_t)header->n_namesz, 4);
+      size_t data_size = ALIGN_MEM((size_t)header->n_descsz, 4);
+      if (name_size > left - sizeof(*header) ||
+          data_size > left - sizeof(*header) - name_size)
+        break;
+      if (header->n_type == NT_GNU_BUILD_ID && header->n_namesz == 4 &&
+          memcmp(note + sizeof(*header), "GNU", 4) == 0 &&
+          header->n_descsz == sizeof(mod->build_id)) {
+        memcpy(mod->build_id, note + sizeof(*header) + name_size, sizeof(mod->build_id));
+        mod->build_id_size = sizeof(mod->build_id);
+      }
+      size_t size = sizeof(*header) + name_size + data_size;
+      note += size;
+      left -= size;
+    }
+  }
   sceKernelFreeMemBlock(so_blockid);
+  mod->ehdr = NULL;
+  mod->phdr = NULL;
+  mod->shdr = NULL;
+  mod->shstr = NULL;
 
   if (!head && !tail)
   {
@@ -494,4 +525,23 @@ uintptr_t so_symbol(so_module *mod, const char *symbol)
   }
 
   return 0;
+}
+
+/* Redirect imported calls without overwriting short Thumb functions. */
+int so_redirect_plt(so_module *mod, const char *name, uintptr_t replacement)
+{
+  int count = 0;
+  if (!mod || !name || !replacement)
+    return 0;
+  for (int i = 0; i < mod->num_relplt; ++i) {
+    const Elf32_Rel *rel = &mod->relplt[i];
+    unsigned int index = ELF32_R_SYM(rel->r_info);
+    if (ELF32_R_TYPE(rel->r_info) == R_ARM_JUMP_SLOT &&
+        index < (unsigned int)mod->num_dynsym &&
+        strcmp(mod->dynstr + mod->dynsym[index].st_name, name) == 0) {
+      *(uintptr_t *)(mod->text_base + rel->r_offset) = replacement;
+      ++count;
+    }
+  }
+  return count;
 }

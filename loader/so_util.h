@@ -33,6 +33,9 @@ typedef struct so_module {
   char *soname;
   char *shstr;
   char *dynstr;
+
+  uint8_t build_id[20];
+  uint32_t build_id_size;
 } so_module;
 
 typedef struct {
@@ -44,6 +47,7 @@ void hook_thumb(uintptr_t addr, uintptr_t dst);
 void hook_arm(uintptr_t addr, uintptr_t dst);
 void hook_addr(uintptr_t addr, uintptr_t dst);
 
+int so_redirect_plt(so_module *mod, const char *name, uintptr_t replacement);
 void so_flush_caches(so_module *mod);
 int so_load(so_module *mod, const char *filename, uintptr_t load_addr);
 int so_relocate(so_module *mod);

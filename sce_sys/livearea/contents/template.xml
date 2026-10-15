@@ -1,24 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-
-<livearea format="1.1" content_version="0001"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:noNamespaceSchemaLocation="http://www.psdevwiki.com/vita/template-xsd/livearea">
-
+<livearea style="a5" format-ver="01.00" content-rev="1">
+    <livearea-background>
+        <image>bg0.png</image>
+    </livearea-background>
     <gate>
-        <title>Street Fighter IV CE</title>
-        <subtitle>
-        </subtittle>
+        <startup-image>startup.png</startup-image>
     </gate>
-
-    <config>
-        <entry>
-            <title>Start</title>
-            <path>startup.png</path>
-        </entry>
-    </config>
-
-    <tools>
-        <image bg="bg0.png" />
-    </tools>
-
 </livearea>

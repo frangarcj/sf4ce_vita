@@ -1,0 +1,43 @@
+name: Build and validate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Asset-free regression tests (ASan/UBSan)
+        run: python3 tools/run_host_tests.py
+  vita:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y python3
+          git clone https://github.com/frangarcj/opensles /tmp/opensles
+          git -C /tmp/opensles checkout e35b0630ac4c9091db63374d5c111d719887dde9
+          make -C /tmp/opensles/libopensles -j2 install
+          git clone https://github.com/Rinnegatamante/vitaShaRK /tmp/vitashark
+          git -C /tmp/vitashark checkout df24065e65098b2d1ac533760109ad4367573f28
+          make -C /tmp/vitashark -j2 install
+          git clone https://github.com/Rinnegatamante/vitaGL /tmp/vitagl
+          git -C /tmp/vitagl checkout a85cb8d0a8d0ed5b9d8f6acdebab5b37cef8a9da
+          make -C /tmp/vitagl ENABLE_LEGACY_PIPELINE=1 NO_DEBUG=1 -j2 install
+      - name: Build Vita package
+        run: |
+          cmake -S . -B build
+          cmake --build build --target SF4CE.vpk-vpk -j2
+      - name: Check Vita resources and APK-free package
+        run: python3 tools/check_package.py build/SF4CE.vpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SF4CE-${{ github.sha }}
+          path: build/SF4CE.vpk
+          if-no-files-found: error

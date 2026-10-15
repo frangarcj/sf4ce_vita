@@ -19,6 +19,8 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -Wl,-q,--wrap,memcpy,--wrap,memmove,--wra
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -std=c++17")
 
 set(VPK_FILE_ARGS
+  ${CMAKE_SOURCE_DIR}/LICENSE LICENSE
+  ${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.md
   ${CMAKE_SOURCE_DIR}/sce_sys/icon0.png sce_sys/icon0.png
   ${CMAKE_SOURCE_DIR}/sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
   ${CMAKE_SOURCE_DIR}/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
@@ -27,8 +29,14 @@ set(VPK_FILE_ARGS
 )
 
 set(CMAKE_SOURCE_DIR ${CMAKE_SOURCE_DIR})
+foreach(license Apache-2.0 LGPL-2.1-or-later LGPL-3.0-or-later MIT)
+  list(APPEND VPK_FILE_ARGS ${CMAKE_SOURCE_DIR}/LICENSES/${license}.txt LICENSES/${license}.txt)
+endforeach()
 add_executable(SF4CE
   loader/main.cpp
+  loader/audio_bridge.cpp
+  loader/movie_player.cpp
+  loader/render_interpolation.cpp
   loader/bionic_compat.cpp
   loader/bridge.c
   loader/so_util.c
@@ -40,7 +48,7 @@ target_include_directories(SF4CE PRIVATE
 
 target_link_libraries(SF4CE
   vitaGL
-  vitaShaRK
+  vitashark
   kubridge_stub
   mathneon
   OpenSLES
@@ -50,6 +58,7 @@ target_link_libraries(SF4CE
   SceAppMgr_stub
   SceAudio_stub
   SceAudioIn_stub
+  SceAvPlayer_stub
   SceTouch_stub
   SceCommonDialog_stub
   SceIme_stub

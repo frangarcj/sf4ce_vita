@@ -1,0 +1,54 @@
+# E.Honda versus Sagat; touch coordinates in the 960x544 framebuffer.
+# Updates run at 20 Hz. Select a portrait twice to confirm a new character.
+wait 240
+tap 480 272 2
+wait 320
+tap 700 480 2
+wait 50
+tap 700 480 2
+wait 350
+tap 400 328 2
+wait 10
+tap 400 328 2
+wait 10
+tap 190 430 2
+wait 10
+tap 735 328 2
+wait 10
+tap 735 328 2
+wait 10
+tap 680 430 2
+wait 800
+pad 20 40
+wait 20
+pad 4000 4
+wait 20
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 10 14
+wait 10
+pad 80 50
+pad 20 2
+pad 80 2
+pad 4020 2
+wait 80
+pad 8 120
+wait 20
+tap 932 28 2
+wait 40
+pad 80 160
+wait 40
+pad 20 240
+wait 40
