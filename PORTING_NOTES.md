@@ -37,7 +37,9 @@ trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
 - El VPK permite sólo loader, SFO, cuatro imágenes Vita, XML y licencias.
   Se rechazan entradas extra y formatos/tamaños de PNG incorrectos.
   APK/XAPK/OBB/so/obm/ckb/cks/mp4 y referencias visuales locales quedan ignorados.
-  No se publican screenshots del juego ni datos extraídos del APK.
+  Los datos extraídos del APK siguen excluidos. Por petición posterior del
+  usuario, se publican tres capturas del port (combate, salto y lista de
+  comandos) en `docs/releases/v1.0-rc1/` para la issue de VitaDB #103.
 - `DebugReplay` acepta comandos añadidos al archivo al llegar a EOF, sólo con
   `debug_input_replay=1`. Permite recorrer menús en el guest sin eventos de
   entrada del escritorio. Probado con duraciones, EOF y comandos inválidos.
@@ -46,8 +48,8 @@ trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
   de host y compilación/VPK correctas. Se descarga y prueba el propio VPK de CI,
   no se sustituye por otro binario local. SHA256 del paquete de release:
   `2550c671c44666d9e4a30ec07c32744c04f3d26b89280a177d7402ec98891389`.
-- Capturas locales de QA (no publicadas): `release-command-list.png` y
-  `release-touch-config.png`. Lista de comandos, selección de personaje,
+- Capturas de QA: `release-command-list.png` (publicada después para VitaDB) y
+  `release-touch-config.png` (local). Lista de comandos, selección de personaje,
   detalles y configuración de botones dibujan bien con la versión del emulador
   corregida. La configuración conserva la interfaz táctil; no redefine el mando
   físico. La memoria protegida del emulador aún registra avisos recuperados.
