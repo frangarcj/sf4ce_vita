@@ -5,6 +5,30 @@
 Este documento recoge evidencia reproducible del port, decisiones tomadas y
 trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
 
+## Teclado de primera ejecución (2026-10-16)
+
+- Se prueba el VPK publicado de CI en Vita3K portable retirando
+  `savedata2.dat` y `.vita_name_entry_confirmed`, con copia previa en
+  `/private/tmp/sf4ce-name-entry-20261016/`. Tocar el título abre el registro;
+  tocar el campo abre el IME y permite escribir. Vita3K dibuja su propio
+  overlay sin necesitar `sceCommonDialogUpdate`, por lo que esa prueba no
+  detectaba que el port presentaba todos los frames con `GL_FALSE`.
+- Los dos caminos de presentación del bucle pasan ahora `g_ime_active` a
+  `vglSwapBuffers`: vitaGL actualiza y dibuja el diálogo del sistema mientras
+  está abierto. La comprobación visual del teclado nativo queda pendiente
+  de una Vita física.
+- La ausencia del save también activa el registro aunque quede una marca
+  antigua. Se comprueba antes de cargar la biblioteca: `NativeInit` escribe
+  un save por defecto y comprobarlo después ocultaría el borrado original.
+- VPK corregido probado con save borrado y marca antigua: registro, apertura
+  de IME, escritura de `VitaFixed`, Submit, OK del juego, callback local tipo
+  11, guardado y entrada en la ayuda inicial. Al reiniciar no vuelve a pedir
+  registro. El log confirma la llamada a `sceCommonDialogUpdate` (Vita3K la
+  declara no implementada y usa su overlay). Cierres de sesión con salida 0.
+  Compilación VitaSDK, suite de host ASan/UBSan y validación de VPK correctas.
+  Se conservan logs y save de prueba en la carpeta de diagnóstico y se
+  restauran save, marca, opciones y replay previos de la copia portable.
+
 ## Preparación de v1.0-rc1 (2026-10-16)
 
 - Repo de publicación: `frangarcj/sf4ce_vita`, público; release preparada como

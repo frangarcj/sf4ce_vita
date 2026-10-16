@@ -3054,6 +3054,14 @@ int main_thread(SceSize args, void *argp)
     (void)args;
     (void)argp;
 
+    // NativeInit creates a default save, so inspect first-run state before
+    // loading the game. A leftover marker must not hide a deleted save.
+    char name_marker_path[512];
+    snprintf(name_marker_path, sizeof(name_marker_path),
+             "%s/.vita_name_entry_confirmed", DATA_PATH);
+    bool initial_name_route_pending = access(name_marker_path, F_OK) != 0 ||
+        access(DATA_PATH "/savedata2.dat", F_OK) != 0;
+
     printf("=== Street Fighter IV CE Vita Port ===\n");
     printf("Loading Android libc++ from %s\n", CXX_SO_PATH);
 
@@ -3422,10 +3430,6 @@ int main_thread(SceSize args, void *argp)
     uint64_t next_simulation = 0, stats_start = 0, simulated = 0, presented = 0;
     uint64_t stats_interpolated = 0, update_cost = 0, draw_cost = 0;
     frame_timing::Clock presentation(frame_timing::kRenderHz);
-    char name_marker_path[512];
-    snprintf(name_marker_path, sizeof(name_marker_path),
-             "%s/.vita_name_entry_confirmed", DATA_PATH);
-    bool initial_name_route_pending = access(name_marker_path, F_OK) != 0;
     bool title_scene_restored = false;
 
     printf("[SF4CE] Starting main loop...\n");
@@ -3469,7 +3473,7 @@ int main_thread(SceSize args, void *argp)
             if (fp_NativeUpdate) fp_NativeUpdate(fake_env, nullptr, g_touch_tbl);
             if (fp_NativeDraw) fp_NativeDraw(fake_env, nullptr);
             ClearLocalRefs();
-            vglSwapBuffers(GL_FALSE);
+            vglSwapBuffers(g_ime_active ? GL_TRUE : GL_FALSE);
             ++presented; draw_cost += sceKernelGetProcessTimeWide() - now_us;
             continue;
         }
@@ -3645,8 +3649,9 @@ int main_thread(SceSize args, void *argp)
             ClearLocalRefs();
         }
 
-        // Swap buffers
-        vglSwapBuffers(GL_FALSE);
+        // vitaGL must update/render the system dialog on every IME frame.
+        // Vita3K draws its own overlay even without this, hiding the hardware bug.
+        vglSwapBuffers(g_ime_active ? GL_TRUE : GL_FALSE);
         if (scheduled_interval != g_simulation_interval_us)
             next_simulation = now_us + g_simulation_interval_us;
         ++simulated; ++presented;
