@@ -15,6 +15,7 @@
 
 extern "C" {
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #include <vitaGL.h>
 }
 
@@ -576,6 +577,20 @@ void glCompressedTexSubImage2D_compat(unsigned int target, int level,
         trace("[GL] CompressedTexSubImage2D target=%X level=%d offset=%d,%d %dx%d format=%X size=%d data=%p (unsupported)\n",
               target, level, xoffset, yoffset, width, height, format,
               image_size, data);
+}
+
+void glReadPixels_compat(int x, int y, int width, int height,
+                         unsigned int format, unsigned int type, void *pixels)
+{
+    uint64_t start = options.debug_timing ? sceKernelGetProcessTimeWide() : 0;
+    glReadPixels(x, y, width, height, format, type, pixels);
+    if (options.debug_timing) {
+        uint64_t cost = sceKernelGetProcessTimeWide() - start;
+        static unsigned logged;
+        if (logged++ < 8 || cost >= 100000)
+            trace("[Timing] readback at %llu us: %dx%d format=%X type=%X: %llu us\n",
+                  start, width, height, format, type, cost);
+    }
 }
 
 // Use the same explicit byte layout for initial and partial uploads: vitaGL's

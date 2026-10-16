@@ -1,0 +1,20 @@
+# Existing player save required. D-pad moves the visible menu pointer.
+wait 240
+pad 4000 2
+wait 360
+pad 20 20
+pad 10 10
+wait 5
+pad 4000 2
+wait 60
+pad 4000 3
+wait 50
+pad 4000 3
+wait 50
+pad 80 10
+pad 40 17
+wait 4
+pad 4000 3
+wait 70
+pad 2000 3
+wait 50

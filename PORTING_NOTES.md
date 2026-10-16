@@ -5,6 +5,61 @@
 Este documento recoge evidencia reproducible del port, decisiones tomadas y
 trabajo pendiente. Debe actualizarse junto con cambios relevantes del loader.
 
+## Mando en menús y diagnóstico de Super/Ultra (2026-10-16)
+
+- Se habilita un cursor visible de menú con cruceta/stick izquierdo, X para
+  pulsar o arrastrar y Círculo para Back. Usa el mismo buffer táctil nativo,
+  coordenadas normalizadas 960×544 y tiempo transcurrido con límite tras cargas.
+  El panel táctil tiene prioridad. Se desactiva en combate, sus transiciones
+  de entrada y el IME; exige soltar X/Círculo al volver de esos estados para
+  evitar activar una opción con un botón que se mantenía pulsado.
+- El dibujo del cursor restaura matrices, viewport, framebuffer, programa,
+  color y habilitación de las dos unidades de textura. Se reservan 64 KiB
+  para modo inmediato también con la intro desactivada.
+- Al habilitar Back se reproduce otro bloqueo: Main inicia la confirmación
+  de salida de Android, `openCommonDialog(1,...)`, y espera indefinidamente
+  porque el stub de `getCommonDialogResId` devuelve 0. El puente devuelve
+  la respuesta de cancelación original: 2 para YES/NO, 1 para avisos de OK,
+  igual que `CommonDialogFragment.onCancel`. La salida de Vita sigue siendo
+  responsabilidad de la interfaz del sistema.
+- Replay de mando: `tests/replays/menu_pad.txt` recorre título, Other y
+  Options con un save existente. Se comprueban visualmente cursor y menús en
+  Vita3K y la recepción de Back. Las pruebas de host ASan/UBSan comprueban
+  límites, arrastre, prioridad táctil y botones mantenidos al cambiar de modo.
+- Se identifica una omisión concreta en la carga del Ultra: las 132 llamadas
+  a `FileLoad("uc_ryu_1p.bmv")` del replay abrían y leían el archivo completo
+  de 2.781.306 bytes cada vez (unos 350 MiB). El Java original devuelve
+  `s_oldFileSize` si el archivo ya reside en `s_data_buf`, pero el port no
+  implementaba esa caché ni `resetOldDataFileInfo`.
+- `shared_file_buffer.h` conserva sólo nombre/tamaño del archivo residente
+  en los 32 MiB existentes, compartido por FileLoad/LocalFileLoad. No reserva
+  otra copia del vídeo. Se invalida al cambiar de archivo, recibir el reset
+  nativo o guardar datos mutables; una lectura parcial/fallida no se recuerda.
+  Pruebas ASan/UBSan: lecturas consecutivas, sustitución, reset, lectura parcial,
+  errores y límite de nombre.
+- Con el mismo replay, las 132 peticiones de vídeo producen sólo 2 lecturas
+  completas tras la corrección (unos 5,3 MiB). Las capturas de Vita3K muestran
+  la cinemática de Ryu y el regreso al combate sin corrupción. También se
+  comprueban Back dos veces en Main, entrada posterior en entrenamiento,
+  pausa y continuación. Compilación VitaSDK, suite de host y validación del
+  VPK correctas. Logs/replay A/B en
+  `/private/tmp/sf4ce-controls-super-20261016/`.
+- El reporte original procede de una Vita física y no hay medida ni
+  confirmación de si se repite tras el primer uso. Se corrige la omisión
+  verificada de caché; confirmar que resuelve el síntoma en hardware sigue
+  pendiente. No se eliminan los hit-stops originales.
+  `debug_timing=1` añade marcas temporales de escena/cámara, frames de más de
+  150 ms separados en NativeUpdate/NativeDraw/presentación, incluidos los
+  frames interpolados, y las primeras lecturas GL a CPU y las lentas.
+  Sin ese ajuste no se toman estas medidas adicionales.
+
+Si persiste en hardware: usar `debug_timing=1` y `debug_log=0`, ejecutar
+el mismo ataque tres veces y conservar `ux0:data/sf4ce/boot.log` antes del
+siguiente arranque. Anotar personaje, ataque y duración aproximada. Comparar
+en sesiones separadas `smooth_rendering=0` y `battle_camera=0`, cambiando sólo
+una opción cada vez. Estas comparaciones sirven para localizar la causa;
+no son correcciones verificadas del reporte.
+
 ## Teclado de primera ejecución (2026-10-16)
 
 - Se prueba el VPK publicado de CI en Vita3K portable retirando
@@ -289,6 +344,16 @@ validación en Vita real y una pasada completa de escenarios y cinemáticas.
 
 ### Personajes y entradas de prueba
 
+- Validación aislada frente a savedata (2026-10-16): se consulta la lista
+  nativa seleccionable con el VPK actual en Vita3K. Sin ningún `.dat` ni
+  marca de nombre previos, el pack completo produce 32 seleccionables.
+  Omitiendo sólo el sentinel `guy_sel_chara.obm` en una vista privada de los
+  recursos, el loader no activa el estado instalado y la misma instalación
+  limpia devuelve 4. Una copia de los datos originales del usuario en esa
+  segunda condición también devuelve 4. Por tanto, los 32 del port proceden
+  de la activación en memoria al verificar los archivos, no del savedata
+  del usuario. Se restauran datos y ejecutable originales con comprobación
+  de hashes; logs y resultados en `/private/tmp/sf4ce-roster-20261016/`.
 - `HasCompleteLocalAssetPack` revisa los 1.985 archivos de combate de los
   32 personajes en el manifiesto soportado, además de los sentinelas del pack.
   Se excluyen terceros colores antiguos/opcionales. Sólo entonces se refleja

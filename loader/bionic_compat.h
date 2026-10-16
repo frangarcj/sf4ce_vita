@@ -71,6 +71,8 @@ void glCompressedTexSubImage2D_compat(unsigned int target, int level,
                                       int xoffset, int yoffset, int width,
                                       int height, unsigned int format,
                                       int image_size, const void *data);
+void glReadPixels_compat(int x, int y, int width, int height,
+                         unsigned int format, unsigned int type, void *pixels);
 void glTexImage2D_compat(unsigned int target, int level, int internal_format,
                          int width, int height, int border,
                          unsigned int format, unsigned int type,

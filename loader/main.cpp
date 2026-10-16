@@ -72,6 +72,8 @@ extern "C"
 
 #include "softfp_wrappers.hpp"
 #include "battle_camera.h"
+#include "menu_pointer.h"
+#include "shared_file_buffer.h"
 #include "audio_bridge.h"
 #include "movie_player.h"
 #include "debug_replay.h"
@@ -180,6 +182,7 @@ static so_module cxx_mod;
 // ============================================================
 
 static uint8_t *g_data_buf = NULL;    // 32 MB
+static shared_file_buffer::Cache g_file_buffer_cache;
 static uint8_t *g_send_buf = NULL;    // 4800 bytes
 static uint8_t *g_receive_buf = NULL; // 4800 bytes
 static uint8_t *g_text_pixels = NULL;
@@ -661,6 +664,63 @@ template<unsigned Index> static void DrawTouchControlsInSetup(void *pad) {
 typedef void *(*PerspectiveFunc)(void *, int, int, int, int);
 static PerspectiveFunc fp_Perspective;
 static uintptr_t fp_GameMainSystem, fp_CameraOffsetNone;
+static menu_pointer::Pointer g_menu_pointer;
+static bool g_menu_back;
+static int g_common_dialog_result;
+static bool MenuPointerEnabled() {
+    if (!g_app_main || !fp_GameMainSystem || g_ime_active) return false;
+    const uint8_t *app = static_cast<const uint8_t *>(g_app_main);
+    uintptr_t scene = *(const uintptr_t *)(app + 0xdec);
+    uintptr_t next = *(const uintptr_t *)(app + 0xdf4);
+    return scene && scene != fp_GameMainSystem && next != fp_GameMainSystem;
+}
+
+static void DrawMenuPointer() {
+    if (!g_menu_pointer.visible || !MenuPointerEnabled()) return;
+    // Immediate mode preserves the game's client array pointers.
+    GLint framebuffer, program, matrix, active_texture;
+    GLboolean textured[2];
+    GLfloat color[4];
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    glGetIntegerv(GL_MATRIX_MODE, &matrix);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
+    glGetFloatv(GL_CURRENT_COLOR, color);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0); glUseProgram(0);
+    glViewport(0, 0, SCREEN_W, SCREEN_H);
+    // Disable both units: a cinematic/menu may leave multitexturing active.
+    for (int unit = 1; unit >= 0; --unit) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        textured[unit] = glIsEnabled(GL_TEXTURE_2D);
+        glDisable(GL_TEXTURE_2D);
+    }
+    glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE);
+    glDisable(GL_LIGHTING); glDisable(GL_FOG);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+    glOrthof(0, 960, 544, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+    const float x = g_menu_pointer.x, y = g_menu_pointer.y;
+    glColor4f(0, 0, 0, 1);
+    glBegin(GL_TRIANGLES);
+    glVertex2f(x - 2, y - 2); glVertex2f(x + 18, y + 12); glVertex2f(x + 5, y + 24);
+    glEnd();
+    glColor4f(1, g_menu_pointer.down ? 0.6f : 1, 0.2f, 1);
+    glBegin(GL_TRIANGLES);
+    glVertex2f(x, y); glVertex2f(x + 14, y + 12); glVertex2f(x + 6, y + 19);
+    glEnd();
+    glMatrixMode(GL_MODELVIEW); glPopMatrix();
+    glMatrixMode(GL_PROJECTION); glPopMatrix();
+    glPopAttrib(); glMatrixMode(matrix);
+    for (int unit = 1; unit >= 0; --unit) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        if (textured[unit]) glEnable(GL_TEXTURE_2D); else glDisable(GL_TEXTURE_2D);
+    }
+    glActiveTexture(active_texture); glColor4fv(color);
+    glUseProgram(program); glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+}
 static uint32_t g_simulation_interval_us = frame_timing::kInitialSimulationUs;
 static void (*fp_AppDrawLoop)(void *);
 static bool g_smooth_render_available = false;
@@ -692,6 +752,17 @@ static void DrawLoopWithInterpolationGuard(void *app) {
     // after it has run, before capturing any geometry or camera history.
     if (!NormalBattleRendering()) RenderInterpolationBegin(false, true, 1);
     fp_AppDrawLoop(app);
+}
+
+static void TraceSlowFrame(uint64_t start, uint64_t update_end,
+                           uint64_t draw_end, uint64_t end, bool simulation) {
+    if (!options.debug_timing || end - start < 150000) return;
+    trace("[Timing] slow frame at %llu us: simulation=%d update=%llu draw=%llu present=%llu us scene=%p camera=%p interval=%u\n",
+          start, simulation, update_end - start, draw_end - update_end,
+          end - draw_end,
+          g_app_main ? (void *)*(uintptr_t *)((uint8_t *)g_app_main + 0xdec) : nullptr,
+          g_app_main ? (void *)*(uintptr_t *)((uint8_t *)g_app_main + 0x1134) : nullptr,
+          g_simulation_interval_us);
 }
 
 static void *ConsolePerspective(void *matrix, int fov, int aspect, int near_z, int far_z)
@@ -1543,6 +1614,16 @@ static void CallStaticVoidMethodV(void *env, jclass clazz, jmethodID methodID, u
         // MovieObj stops game sounds and owns the return-to-title transition.
         if (!PlayIntroMovie(SCREEN_W, SCREEN_H, options.audio, MovieReplaySkip))
             GuardUnavailableIdleMovie();
+    } else if (!strcmp(name, "resetTouchBackKey")) {
+        g_menu_back = false;
+    } else if (!strcmp(name, "resetOldDataFileInfo")) {
+        g_file_buffer_cache.Reset();
+    } else if (!strcmp(name, "openCommonDialog")) {
+        // CommonDialogFragment.onCancel: NO for YES/NO, OK for notices.
+        // In particular, Back on Main must not wait forever for Android's
+        // absent quit confirmation. Vita exits through its system UI.
+        g_common_dialog_result = args && args[0] == 1 ? 2 : 1;
+        trace("[Menu] dismissed Android common dialog (result=%d)\n", g_common_dialog_result);
     } else if (!strcmp(name, "setAnimationInterval") || !strcmp(name, "FrameIntervalSet")) {
         uint32_t interval = args ? frame_timing::NativeInterval(static_cast<int>(args[0]), !strcmp(name, "setAnimationInterval")) : 0;
         if (interval) {
@@ -1747,6 +1828,8 @@ static jint CallStaticIntMethodV(void *env, jclass clazz, jmethodID methodID, ui
         return 143;
     if (!strcmp(name, "getKeyDownData_GamceController"))
         return (jint)g_controller_buttons;
+    if (!strcmp(name, "getCommonDialogResId"))
+        return g_common_dialog_result;
     if (!strcmp(name, "getCharLength")) {
         const char *string = args ? (const char *)args[0] : NULL;
         return string ? (jint)strlen(string) : 0;
@@ -1788,6 +1871,8 @@ static jint CallStaticIntMethodV(void *env, jclass clazz, jmethodID methodID, ui
         return (width10 << 16) | (height10 & 0xffff);
     }
     if (!strcmp(name, "LocalFileSave")) {
+        // The engine has written new bytes into the shared buffer to save.
+        g_file_buffer_cache.Reset();
         const char *filename = args ? (const char *)args[0] : NULL;
         int length = args ? (int)args[1] : 0;
         if (!filename || strstr(filename, "..") || strchr(filename, '/') ||
@@ -1808,6 +1893,14 @@ static jint CallStaticIntMethodV(void *env, jclass clazz, jmethodID methodID, ui
         const char *filename = args ? (const char *)args[0] : NULL;
         trace("[JNI] %s args=%p filename=%p %s\n", name, args, filename,
               filename ? filename : "(null)");
+        int resident = g_file_buffer_cache.Find(filename);
+        if (resident >= 0) {
+            static unsigned logged_hits;
+            if (options.debug_timing && logged_hits++ < 8)
+                trace("[Timing] resident file buffer: %s (%d bytes)\n", filename, resident);
+            return resident;
+        }
+        g_file_buffer_cache.Reset();
         void *asset = vita_asset_open(filename, 2, NULL);
         if (!asset)
             return 0;
@@ -1818,6 +1911,7 @@ static jint CallStaticIntMethodV(void *env, jclass clazz, jmethodID methodID, ui
         }
         int amount = vita_asset_read(asset, g_data_buf, (unsigned int)length);
         vita_asset_close(asset);
+        g_file_buffer_cache.Remember(filename, amount, length);
         return amount > 0 ? amount : 0;
     }
     if (!strcmp(name, "PngFileLoad") || !strcmp(name, "LocalPngFileLoad")) {
@@ -1931,6 +2025,8 @@ static jboolean CallStaticBooleanMethodV(void *env, jclass clazz, jmethodID meth
     const char *name = (const char *)methodID;
     if (!name)
         return 0;
+    if (!strcmp(name, "getTouchBackKey"))
+        return g_menu_back;
     if (!strcmp(name, "isObbCheckExist") || !strcmp(name, "isObbMounted") ||
         !strcmp(name, "isDownLoadedAssetPack") ||
         !strncmp(name, "checkPermission", 15))
@@ -2497,6 +2593,31 @@ void mapVitaInputToTouch(SceCtrlData *pad)
         }
     }
 
+    const bool diagnostic_cursor = options.debug_touch_cursor &&
+                                   (pad->buttons & SCE_CTRL_SELECT);
+    float dx = NormalizeStick(pad->lx), dy = NormalizeStick(pad->ly);
+    if (pad->buttons & SCE_CTRL_LEFT) dx = -1;
+    if (pad->buttons & SCE_CTRL_RIGHT) dx = 1;
+    if (pad->buttons & SCE_CTRL_UP) dy = -1;
+    if (pad->buttons & SCE_CTRL_DOWN) dy = 1;
+    bool menu = MenuPointerEnabled() && !diagnostic_cursor;
+    g_menu_pointer.Update(sceKernelGetProcessTimeWide(), menu, touch.reportNum > 0,
+                          dx, dy, pad->buttons & SCE_CTRL_CROSS,
+                          pad->buttons & SCE_CTRL_CIRCLE);
+    g_menu_back = g_menu_pointer.back;
+    if (menu) {
+        // The native game still owns click handling, scrolling and dragging.
+        // Do not deliver the same buttons again through its combat controller.
+        g_controller_buttons = 0;
+        g_left_stick_x = g_left_stick_y = 0;
+        g_right_stick_x = g_right_stick_y = 0;
+    }
+    if (g_menu_pointer.down) {
+        touch.reportNum = 1;
+        touch.report[0].x = (int)(g_menu_pointer.x * 2);
+        touch.report[0].y = (int)(g_menu_pointer.y * 2);
+    }
+
 
     // Optional diagnostic pointer: hold Select, move with the D-pad and tap
     // Cross. This travels through the same Android touch bridge as the panel,
@@ -2975,7 +3096,7 @@ static so_default_dynlib default_dynlib[] = {
     {"glPixelStorei", (uintptr_t)&glPixelStorei},
     {"glPopMatrix", (uintptr_t)&glPopMatrix},
     {"glPushMatrix", (uintptr_t)&glPushMatrix},
-    {"glReadPixels", (uintptr_t)&glReadPixels},
+    {"glReadPixels", (uintptr_t)&glReadPixels_compat},
     {"glRenderbufferStorageOES", (uintptr_t)&glRenderbufferStorage_compat},
     {"glRotatef", WRAP(glRotatef)},
     {"glScalef", WRAP(glScalef)},
@@ -3394,7 +3515,7 @@ int main_thread(SceSize args, void *argp)
     };
     int aa_option = options.msaa >= 0 && options.msaa <= 2 ? options.msaa : 2;
     // Leave physically contiguous memory for the hardware video decoder.
-    int has_low_res = vglInitWithCustomThreshold(IntroMovieAvailable() ? 64 * 1024 : 0, SCREEN_W, SCREEN_H,
+    int has_low_res = vglInitWithCustomThreshold(64 * 1024, SCREEN_W, SCREEN_H,
         MEMORY_VITAGL_THRESHOLD_MB * 1024 * 1024, 0,
         IntroMovieAvailable() ? 32 * 1024 * 1024 : 0,
         0x8C6000, aa_modes[aa_option]); // vitaGL's standard dialog reserve
@@ -3444,6 +3565,16 @@ int main_thread(SceSize args, void *argp)
     {
         uint64_t now_us = sceKernelGetProcessTimeWide();
         bool smooth = options.smooth_rendering && NormalBattleRendering();
+        if (options.debug_timing && g_app_main) {
+            static uintptr_t previous_scene, previous_camera;
+            uintptr_t scene = *(uintptr_t *)((uint8_t *)g_app_main + 0xdec);
+            uintptr_t camera = *(uintptr_t *)((uint8_t *)g_app_main + 0x1134);
+            if (scene != previous_scene || camera != previous_camera) {
+                trace("[Timing] transition at %llu us: scene=%p camera=%p smooth=%d\n",
+                      now_us, (void *)scene, (void *)camera, smooth);
+                previous_scene = scene; previous_camera = camera;
+            }
+        }
         uint64_t deadline = smooth ? presentation.Deadline() : next_simulation;
         if (deadline > now_us) {
             sceKernelDelayThread(static_cast<unsigned>(deadline - now_us));
@@ -3471,9 +3602,13 @@ int main_thread(SceSize args, void *argp)
             // Preserve NativeUpdate's framebuffer bind and final composition.
             // The PLT gates omit simulation/input/audio work on these frames.
             if (fp_NativeUpdate) fp_NativeUpdate(fake_env, nullptr, g_touch_tbl);
+            uint64_t update_end = options.debug_timing ? sceKernelGetProcessTimeWide() : 0;
             if (fp_NativeDraw) fp_NativeDraw(fake_env, nullptr);
             ClearLocalRefs();
+            uint64_t draw_end = options.debug_timing ? sceKernelGetProcessTimeWide() : 0;
             vglSwapBuffers(g_ime_active ? GL_TRUE : GL_FALSE);
+            if (options.debug_timing)
+                TraceSlowFrame(now_us, update_end, draw_end, sceKernelGetProcessTimeWide(), false);
             ++presented; draw_cost += sceKernelGetProcessTimeWide() - now_us;
             continue;
         }
@@ -3581,6 +3716,7 @@ int main_thread(SceSize args, void *argp)
         }
 
         // Call native update (processes inputs and updates game state)
+        uint64_t native_start = options.debug_timing ? sceKernelGetProcessTimeWide() : 0;
         if (fp_NativeUpdate)
         {
             fp_NativeUpdate(fake_env, NULL, g_touch_tbl);
@@ -3635,6 +3771,7 @@ int main_thread(SceSize args, void *argp)
                 --touch_trace_frames;
             }
         }
+        uint64_t native_update_end = options.debug_timing ? sceKernelGetProcessTimeWide() : 0;
         if (g_mark_name_after_update)
         {
             g_mark_name_after_update = false;
@@ -3649,9 +3786,15 @@ int main_thread(SceSize args, void *argp)
             ClearLocalRefs();
         }
 
+        uint64_t native_draw_end = options.debug_timing ? sceKernelGetProcessTimeWide() : 0;
+        DrawMenuPointer();
+        g_menu_back = false;
         // vitaGL must update/render the system dialog on every IME frame.
         // Vita3K draws its own overlay even without this, hiding the hardware bug.
         vglSwapBuffers(g_ime_active ? GL_TRUE : GL_FALSE);
+        if (options.debug_timing)
+            TraceSlowFrame(native_start, native_update_end, native_draw_end,
+                           sceKernelGetProcessTimeWide(), true);
         if (scheduled_interval != g_simulation_interval_us)
             next_simulation = now_us + g_simulation_interval_us;
         ++simulated; ++presented;

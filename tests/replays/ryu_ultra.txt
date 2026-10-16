@@ -1,0 +1,38 @@
+# Existing player save, default training gauges. Ryu versus Ken.
+wait 240
+tap 480 272 2
+wait 320
+tap 700 480 2
+wait 50
+tap 700 480 2
+wait 240
+tap 320 328 2
+wait 10
+tap 190 430 2
+wait 10
+tap 315 430 2
+wait 10
+tap 680 430 2
+wait 600
+# Two quarter-circles forward followed by the face-button combination.
+pad 40 1
+pad 60 1
+pad 20 1
+pad 40 1
+pad 60 1
+pad F020 2
+wait 160
+pad 40 1
+pad 60 1
+pad 20 1
+pad 40 1
+pad 60 1
+pad F020 2
+wait 160
+pad 40 1
+pad 60 1
+pad 20 1
+pad 40 1
+pad 60 1
+pad F020 2
+wait 160

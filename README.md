@@ -2,7 +2,7 @@
 
 Port of *Street Fighter IV CE (Android)* for the *PS Vita*.
 
-The first release candidate is **v1.0-rc1**, prepared as a GitHub prerelease.
+The latest test release is [**v1.0-rc3**](https://github.com/frangarcj/sf4ce_vita/releases/tag/v1.0-rc3), published as a GitHub prerelease.
 It has been exercised in Vita3K; hardware performance, memory use and audio
 latency still need validation on a real Vita. This is an offline port.
 
@@ -35,8 +35,11 @@ These calls are implemented or isolated by the compatibility layer in
 
 ### Input Mapping
 
-Menus retain native touch input. Combat controls are sent through the game's
-Android controller bitfield, while the mobile combat overlay is hidden:
+Menus support a visible pointer: move it with the D-pad or left stick, hold
+Cross to click/drag, and press Circle to go back. Touch input takes priority
+and hides the pointer. Circle on Main dismisses Android's unavailable quit
+confirmation; use the Vita system UI to exit. Combat controls are sent through
+the game's Android controller bitfield, while the mobile combat overlay is hidden:
 - **Cross** → Combat button 1 (attack)
 - **Circle** → Combat button 2
 - **Square** → Combat button 3
@@ -67,8 +70,8 @@ ux0:tai/fd_fix.skprx
 
 1. Obtain `libGltest2jni.so` and its matching `libc++_shared.so` from your own ARM32 APK (tested: 1.05.00, `lib/armeabi-v7a/`)
 2. Copy both libraries to `ux0:data/sf4ce/`
-3. Copy game assets (`.obm` files) to `ux0:data/sf4ce/assets/`
-4. Copy demand-loaded assets to `ux0:data/sf4ce/demand_assets/`
+3. Copy the complete game asset directory to `ux0:data/sf4ce/assets/`, preserving filenames and all file types.
+4. Copy the complete demand-loaded asset directory, including the downloaded character data, to `ux0:data/sf4ce/demand_assets/`.
 5. Optionally copy the original `sf4_online.mp4` to `demand_assets/`.
 
 No APK, Android libraries, extracted game data, audio or movie is supplied.
@@ -87,8 +90,42 @@ ux0:data/sf4ce/
 │   ├── abel_02.obm
 │   └── ...
 └── demand_assets/            # Demand-loaded assets
-    └── ...
+    ├── _filelist.txt          # Original complete asset manifest
+    └── ...                   # Full character data, not just selection portraits
 ```
+
+### Unlocking all 32 characters
+
+The port enables the full roster automatically when it detects the complete
+local character pack from your own matching Android copy. **An unlocked
+savedata is not required.** There is no unlock code or configuration switch,
+and upgrading does not require deleting or replacing your save.
+
+Obtain the full game data, including its downloaded character pack; the base
+APK alone may not contain all of it. Copy the complete asset folders rather
+than selecting only `.obm` files: the roster also needs its `.bin` and `.idx`
+files. Keep the original names and directory layout.
+
+For the supported 1.05.00 data, the check requires:
+
+- The original `_filelist.txt` in `ux0:data/sf4ce/demand_assets/`.
+- Nonempty `guy_sel_chara.obm`, `jri_sel_chara.obm`, `dan_sel_chara.obm`,
+  `eln_sel_chara.obm` and `psn_sel_chara.obm` in that same directory.
+- All 1,985 required combat files in the supported manifest, including the
+  portrait data for all 32 characters, in `assets/` or `demand_assets/`.
+  Optional third-color/legacy files are excluded from this check.
+
+When these checks pass, the loader enables the installed content state in
+memory on startup. This was verified with a fresh save: **32 selectable
+characters** with the complete pack, versus **4** without the loader's pack
+activation. A copy of an existing save also gave 4 without that activation.
+
+If only four characters are available, check the files above and
+`ux0:data/sf4ce/boot.log`. A complete installation reports
+`[Assets] complete user asset pack: yes`; missing combat files are listed as
+`[Assets] missing combat file: ...`. Restore the missing original files and
+restart the game. Empty placeholders or selection portraits alone do not
+satisfy the check. The VPK does not include or download this game data.
 
 ### Configuration (options.cfg)
 
@@ -109,8 +146,8 @@ The optional `demand_assets/sf4_online.mp4` intro plays through SceAvPlayer
 with audio and its original aspect ratio. Touch, Cross, Circle or Start skips
 it; completion returns to the title. If the file/backend is unavailable,
 the title stays visible instead of fading into a missing movie.
-The local content state is enabled only after the 32-character combat pack
-passes file checks; saves are not rewritten to fabricate purchases.
+See [Unlocking all 32 characters](#unlocking-all-32-characters) for the full
+character-pack requirements and troubleshooting.
 
 Optional integration test controls (leave disabled for normal play):
 
@@ -118,12 +155,18 @@ Optional integration test controls (leave disabled for normal play):
 debug_touch_cursor=0  # Select+D-pad moves a cursor, Select+Cross taps
 debug_input_replay=0  # Reads ux0:data/sf4ce/debug-input.txt at the normal update rate
 debug_audio_capture=0 # Writes up to 180 seconds to ux0:data/sf4ce/audio-debug.wav
-debug_timing=0        # Reports simulation/render cadence and interpolation memory
+debug_timing=0        # Reports cadence, scene/camera transitions and slow frames
 ```
 
 Example replay files are in `tests/replays/`. They use `wait <updates>`,
 `tap <x> <y> <updates>` and `pad <Vita-button-mask-hex> <updates>`.
 The cursor and replay both use the regular Android touch/controller bridge.
+`menu_pad.txt` exercises title, Other, Options and Back using only pad commands
+with an existing player save. Menu movement uses elapsed time rather than a
+fixed distance per update, and the pointer is hidden during combat and the IME.
+`ryu_ultra.txt` exercises repeated Ryu Ultras in training. File reads retain
+Android's shared-buffer cache so movie chunks reuse the resident data instead
+of reading the entire movie again for each chunk.
 Combat simulation normally runs at 20 Hz; loading/menu phases can request a
 different cadence through the original Android interval callback.
 `title_movie_skip.txt` exercises the idle intro, Start to skip and subsequent
